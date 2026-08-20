@@ -1,0 +1,27 @@
+# 临时与敏感文件
+*.tmp
+*.log
+.env
+.env.local
+
+# Claude Code 本地缓存
+.claude/memory.db
+.claude/memory.db-journal
+.claude/settings.local.json
+
+# PowerShell 临时输出
+run-fixture-output.json
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# Node / Bun（即便本仓库没用，防止误提交）
+node_modules/
+bun.lockb
