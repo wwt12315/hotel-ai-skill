@@ -1,141 +1,181 @@
 # hotel-ai-skill
 
-让 AI 直接帮客户**搜索、预订、取消酒店**的 Claude Code slash command 集合，对接 [hotelbyte](https://github.com/hotelbyte-com) 公开测试 API。
+> **Agent-tool-agnostic** skill pack for booking hotel rooms through the
+> [hotelbyte](https://openapi.hotelbyte.com) OpenAPI. Single source-of-truth
+> works for **Claude Code, Cursor, Codex, GitHub Copilot, Cline** — any agent
+> that can load Markdown + YAML.
 
-> 起源：参考 zread.ai / TourMind 之类的"AI 直接订酒店"产品形态，做一个最小可运行版本，覆盖**搜索 → 验证 → 下单 → 取消**完整闭环。
+> ⚠️ **演示环境实测发现**：hotelbyte 测试环境 (`api-test.hotelbyte.com`) 的
+> `hotelStaticDetail` 接口**不**返回房型与 `ratePkgId`，因此本 skill pack
+> 不含 `/hotel-detail` 命令；价格 / 库存的最终确认必须经由 `hotel-check-availability`。
 
-## 这个仓库里有什么
+---
+
+## 这是什么
+
+一套让 AI agent **直接帮客户预订酒店**（不只是推荐）的 skill 协议：
+
+| 能力 | 作用 |
+|---|---|
+| `hotel-search` | 自然语言 → 调用 `/api/search/hotelList` → 返回酒店列表 + 解读 |
+| `hotel-check-availability` | 验证某个 `ratePkgId` 当前是否可订（hotelbyte 文档要求 "verify before commit"） |
+| `hotel-book` | Dry-run 默认；`--confirm` 才真下单并轮询订单状态（`/api/trade/book` + `/api/trade/queryOrders`） |
+| `hotel-cancel` | Dry-run 默认；`--confirm` 才真取消并轮询（`/api/trade/cancel` + `/api/trade/queryOrders`） |
+
+**完整预订闭环**：
+
+```
+hotel-search ──→ hotel-check-availability ──→ hotel-book [--confirm] ──→ hotel-cancel [--confirm]
+  (只读)             (只读)                    (写入)                       (写入)
+```
+
+---
+
+## 与 `.claude/commands/` 的差别（迁移记录）
+
+旧版本使用 `.claude/commands/<name>.md`，是 **Claude Code 工具私有的**命令机制：
+- 触发依赖 `/` 前缀，别的 agent 工具（Cursor / Codex / Copilot / Cline）识别不到
+- frontmatter 字段（`allowed-tools`, `argument-hint`）是 Claude Code 私有扩展
+- 没有机器可读的 manifest，要靠 agent 工具自己扫目录 + parse frontmatter
+
+**新版改用 hotelbyte 标准 agent 工具无关 skills 协议**（对齐
+`.shared/skills/<skill-name>/SKILL.md` + `MANIFEST.yaml` 双层结构）：
 
 ```
 hotel-ai-skill/
-├── README.md                          # 你正在看的这份文档
-├── .claude/
-│   └── commands/
-│       ├── hello.md                       # /hello —— smoke test
-│       ├── hotel-search.md                # /hotel-search —— 自然语言搜索
-│       ├── hotel-check-availability.md    # /hotel-check-availability —— 下单前预检
-│       ├── hotel-book.md                  # /hotel-book —— 下单（默认 Dry-run）
-│       └── hotel-cancel.md                # /hotel-cancel —— 取消订单（默认 Dry-run）
-└── docs/
-    └── skill-outputs/
-        ├── hotel-search.md                # /hotel-search 详细使用文档
-        └── run-fixture.ps1                # PowerShell 5.1 fixture 脚本
+├── MANIFEST.yaml                 # agent 无关的机器可读索引（schema: hotelbyte-skill-pack/v1）
+├── skills/
+│   ├── hotel-search/SKILL.md     # 标准 frontmatter（只含 name + description）
+│   ├── hotel-check-availability/SKILL.md
+│   ├── hotel-book/SKILL.md
+│   └── hotel-cancel/SKILL.md
+└── README.md
 ```
 
-## 4 个 slash command 一览
+**frontmatter 只声明两件事**：
+- `name` — skill 的稳定 ID
+- `description` — 含触发词的描述，agent 据此判断是否触发；遵循
+  hotelbyte `writing-great-skills` 的"leading word + 多 trigger phrase"原则
 
-| 命令 | 触发时机 | 端点 | 关键输出 |
-|---|---|---|---|
-| `/hello` | 验证 Claude Code 项目级 command 能识别 | — | smoke test |
-| `/hotel-search <自然语言>` | 起点 | `POST /api/auth/ticket` + `POST /api/search/hotelList` | hotelId + `ratePkgId`（关键） |
-| `/hotel-check-availability <ratePkgId>` | 搜索后、下单前 | `POST /api/search/checkAvail` | 价格 snapshot（status: 1 = 可订） |
-| `/hotel-book <ratePkgId> <姓名> <email> [--confirm]` | 验证后 | `POST /api/trade/book` + 轮询 `/api/trade/queryOrders` | 真下单 |
-| `/hotel-cancel <customerRef> <supplierRef> [--confirm]` | 任何时候 | `POST /api/trade/cancel` + 轮询 `/api/trade/queryOrders` | 取消订单 |
+**agent-specific 字段（`allowed-tools` / `argument-hint`）放进 SKILL.md 正文
+「工具权限建议」段**。需要时由各 agent 的 discovery adapter 自行映射，
+本仓库不绑定任何特定 agent。
 
-> ⚠️ **设计决策**：`/hotel-detail` 端点（`/api/search/hotelStaticDetail`）已被实测证明**只返回酒店静态信息**（名 / 地址 / 坐标 / minPrice），**不包含房型 / ratePkgId**。功能完全被 `/hotel-search` 输出覆盖，因此本 skill 集合**不包含** `/hotel-detail`。
+---
 
-## 完整使用流程
+## Agent 接入方式
 
-```
-用户：在 Claude Code 里输入
-   /hotel-search 我下周五去东京，2 晚，2 个大人，预算每晚 200 美元以内，要 4 星以上
-                                    ↓
-                           拿到酒店列表 + 每家酒店的 rooms[].rates[].ratePkgId
-                                    ↓
-   /hotel-check-availability RP461850557-1234567890
-                                    ↓
-                           拿到价格 snapshot（status: 1 = 可订）
-                                    ↓
-   /hotel-book RP461850557-1234567890 张三 zhangsan@example.com
-                                    ↓
-                           输出"准备下单"清单（Dry-run，不真下单）
-                                    ↓
-   /hotel-book RP461850557-1234567890 张三 zhangsan@example.com --confirm
-                                    ↓
-                           调 /api/trade/book + 轮询 /api/trade/queryOrders
-                                    ↓
-                           拿到 platformReferenceNo / supplierReferenceNo
-                                    ↓
-   /hotel-cancel <customerRef> <supplierRef> --confirm
-                                    ↓
-                           取消订单
+任何能消费 Markdown + YAML 的 agent 都可以用这个仓库。三种方式：
+
+### 方式 1：直接读 MANIFEST.yaml（推荐）
+
+```python
+import yaml
+with open('MANIFEST.yaml') as f:
+    pack = yaml.safe_load(f)
+for skill in pack['skills']:
+    print(skill['name'], '→', skill['description'][:60])
+    print('  triggers:', skill['triggers'])
+    print('  dry_run_by_default:', skill['dry_run_by_default'])
 ```
 
-## 当前阶段的能力边界
+输出的 4 个 skill 即为可消费索引。`inputs` / `outputs` 段是 typed
+JSON Schema 风格描述（简化版，足够给 LLM 解析），符合 hotelbyte
+`agent-dev-contract` Pattern 2（typed I/O）契约。
 
-| 能做 | 不能做 |
-|---|---|
-| 4 个 slash command 覆盖搜索→预检→下单→取消 | 改订单（改日期 / 改房型）——只能"取消后重订" |
-| 自然语言查询（中文 / 英文 / 相对日期） | 部分取消（只取消订单的 1 间房） |
-| Dry-run 默认 + `--confirm` 真下单 + 轮询验证 | 真实下单场景（演示环境库存稀缺） |
-| 任意 Claude Code 项目里通过 `.claude/commands/` 项目级生效 | 在裸 bash / 其他 CLI（不走 Claude Code）生效 |
-| 公开测试凭据（hotelbyte_api_demo） | 真实生产凭据（你自己申请 partner key） |
-
-## 安全约束（设计时就内嵌了）
-
-- **narrow permissions**：每个 slash command 只允许 `Bash(curl:*)` / `Bash(date:*)` / `Bash(uuidgen:*)`，**绝不**开放 `Bash(*)` 全权限
-- **narrow permissions（book / cancel）**：`Bash(curl:*)` / `Bash(date:*)` / `Bash(uuidgen:*)` / `Bash(sleep:*)`（用于轮询）
-- **Dry-run by default**：`/hotel-book` 和 `/hotel-cancel` 默认干跑，**必须**加 `--confirm` 才真下单 / 真取消
-- **不持久化 ticket**：ticket 只活在当次 session，不写 `.claude/memory.db`、不进 commit
-- **本地订单快照**：写 `.claude/orders/<uuid>.json`（**不**进 memory.db）
-- **公开凭据**：演示用的是 hotelbyte 公开测试凭据（`api-test.hotelbyte.com` 免注册），不涉及真实账号密钥
-- **不改后端**：本仓库纯新增文件，不修改 `hotel-be` / `hotel-fe` / `sdk-go` 等任何 submodule
-
-## 怎么本地验证
-
-### 方法一：在 Claude Code 里跑完整流程
+### 方式 2：Claude Code / Cursor 落盘到对应 skills 目录
 
 ```bash
-# 在项目根目录
-claude
-
-> /hello                                                 # smoke test
-> /hotel-search Tokyo 20260828 20260830 2 200 4          # happy path
-> /hotel-check-availability RP461850557-1234567890       # 验证
-> /hotel-book RP461850557-1234567890 张三 zhangsan@example.com        # Dry-run
-> /hotel-book RP461850557-1234567890 张三 zhangsan@example.com --confirm  # 真下单
-> /hotel-cancel <customerRef> <supplierRef> --confirm    # 取消
+# Claude Code（注意是 .claude/skills 不是 .claude/commands）
+mkdir -p .claude/skills
+for s in hotel-search hotel-check-availability hotel-book hotel-cancel; do
+  ln -s ../../skills/$s .claude/skills/$s
+done
 ```
 
-### 方法二：用 PowerShell fixture 脚本（不依赖 Claude Code）
-
-```powershell
-.\docs\skill-outputs\run-fixture.ps1
+```bash
+# Cursor
+mkdir -p .cursor/skills
+for s in hotel-search hotel-check-availability hotel-book hotel-cancel; do
+  ln -s ../../skills/$s .cursor/skills/$s
+done
 ```
 
-预期输出：拿到 `ticket`，然后 `no_availability`（测试 API 无真实库存，符合预期）。
+### 方式 3：把本仓库整体作为 git submodule
 
-## 6 步状态机（OrderStatus 文档 §OrderStatus）
+```bash
+git submodule add https://github.com/wwt12315/hotel-ai-skill.git .shared/third-party-skills/hotel-ai-skill
+# 然后在 .shared/skills/ 下做 symlink，或直接交给 agent 的 discovery 层
+```
 
-| 值 | 名称 | 含义 | 可取消？ |
-|---|---|---|---|
-| 0 | Unknown | 未知（不应该出现） | ❌ |
-| 1 | Confirming | 等待供应商确认 | ✅（趁还没确认） |
-| 2 | Confirmed | 已确认 | ✅（**可能要付取消费**） |
-| 3 | Cancelled | 已取消 | ❌（幂等） |
-| 4 | Failed | 失败 | ❌（终态） |
-| 5 | CancelFailed | 取消失败 | ⚠️（重试） |
+---
 
-## 环境
+## 安全契约（hotelbyte `agent-dev-contract` 对齐）
 
-- Windows 10/11 + PowerShell 5.1
-- Claude Code CLI（任意 LLM 后端，因为 skill 只描述流程）
-- `curl`（Windows 自带即可，支持 Schannel TLS）
+| 模式 | 落地 |
+|---|---|
+| Pattern 5 Tool Use | 每个 skill 在 MANIFEST 声明 typed inputs / outputs；不允许自由文本透传 |
+| Pattern 13 Human-in-the-Loop | `hotel-book` / `hotel-cancel` 默认 Dry-run，必须显式 `--confirm` 才执行；agent **不得**自动加 `--confirm` 即使用户说"继续" |
+| 7 条诚实契约 | 不伪造酒店列表；4xx/5xx 返回结构化 gap；demo 凭据不进任何持久化文件；ticket 仅内存持有 |
 
-## 已知限制
+### Dry-run 默认行为
 
-1. **TLS 证书**：hotelbyte 测试 API 证书可能过期，脚本用 `curl -k`（Schannel 兼容）跳过校验。
-2. **测试 API 无真实库存**：`POST /api/search/hotelList` 在测试环境**始终**返回 `no_availability` 分支，**真下单/验证/取消都需要真实 ratePkgId**。演示环境能验证的只是错误分支（404 / 格式校验），真实路径需在生产环境/有库存环境验证。
-3. **自然语言日期**：相对日期（"下周五"、"明天"）解析由 LLM 完成，复杂度受模型能力限制。模糊时建议用绝对日期（`YYYYMMDD`）。
-4. **中文姓名**：传给酒店前必须**拼音化**（CJK 字符可能被拒）。`/hotel-book` 会反问一次确认。
-5. **演示环境轮询**：每 10 秒一次，最多 18 次（3 分钟）。真实 confirm 可能需要 5-15 分钟，演示环境超时正常。
+- `hotel-search` / `hotel-check-availability`：纯读，不需 `--confirm`
+- `hotel-book` 默认输出"准备下单"清单（ratePkgId / guest / total price），**不**调用 `/api/trade/book`
+- `hotel-cancel` 默认先调 `/api/trade/queryOrders` 查状态，输出"准备取消"清单，**不**调用 `/api/trade/cancel`
+- 加上 `--confirm` 才执行写入操作，并自动轮询直到终态或 18×10s 超时
 
-## 设计参考
+### Idempotency
 
-- hotelbyte 公开测试 API 文档：https://openapi.hotelbyte.com
-- hotelbyte 测试 API：`https://api-test.hotelbyte.com`
-- 产品形态参考：zread.ai、TourMind（AI 直接订酒店的产品形态）
+`customerReferenceNo` 作为幂等键：重试同一请求不会重复下单。生成方法见
+`uuidgen` 命令，每次新请求换一个值（除非显式 retry）。
 
-## License
+---
 
-私有仓库（虽然目前是 public 状态）。代码仅供内部演示。
+## 演示环境实测限制（重要）
+
+| 现象 | 原因 | 影响 |
+|---|---|---|
+| `hotelStaticDetail` 只返回酒店静态信息 | 演示供应商未配置静态详情档 | 不影响 `/hotel-search`；如需房型价格必须走 `hotel-check-availability` |
+| `hotel-search` 经常返回 `status=failed / reason=no_availability` | 演示供应商对远期日期无可用库存 | 建议目的地选 Hong Kong / Bangkok / Singapore；或日期往后挪 30-90 天 |
+| `hotel-check-availability` 报 `session not found` | Session-Id 与 `/api/auth/ticket` 不在同一进程 | 必须用同一 ticket 在同一 session 内查；ticket TTL 默认 3600s |
+| `hotel-book` 报 `ratePkgId validation failed` | 演示环境不返回真实可订的 ratePkgId | **端到端下单无法在演示环境验证**；生产 partner key 才能跑通 |
+| 4xx branch（400 / 401 / 404 / 500） | hotelbyte 通用错误码 | 4 个 SKILL.md 都已实测覆盖 |
+
+> **已实现 ≠ 已端到端验证**：`hotel-book` / `hotel-cancel` 的"非 happy path"分支
+> 通过 curl 实测验证；"happy path"在演示环境无法走通，需真实 partner key。
+> 这是 hotelbyte 演示环境的客观限制，不是 skill 的问题。
+
+---
+
+## 文件清单
+
+```
+hotel-ai-skill/
+├── MANIFEST.yaml                          # 214 行，agent 无关的机器可读索引
+├── README.md
+└── skills/
+    ├── hotel-search/SKILL.md              # 自然语言 → 酒店列表
+    ├── hotel-check-availability/SKILL.md  # 验价 + 验库存（verify before commit）
+    ├── hotel-book/SKILL.md                # 下单（Dry-run 默认，--confirm 执行）
+    └── hotel-cancel/SKILL.md              # 取消（Dry-run 默认，--confirm 执行）
+```
+
+---
+
+## 协议参考
+
+- hotelbyte 内部标准：`.shared/skills/<skill-name>/SKILL.md` + `MANIFEST` + 三层 discovery（详见 `DISCOVERY.md`）
+- 协议字段：YAML frontmatter 仅含 `name` / `description` / 可选 `disable-model-invocation`；agent 私字段（`allowed-tools`、`argument-hint`）下沉到正文
+- 诚实契约：hotelbyte `.shared/skills/agent-dev-contract`（21 模式 + 7 条不可协商契约 + 15 条欺骗红线）
+- 元 skill：hotelbyte `.shared/skills/writing-great-skills`（frontmatter 写法、信息层级、leading word）
+
+---
+
+## 演示凭据
+
+- Base URL：`https://api-test.hotelbyte.com`
+- AppKey：`hotelbyte_api_demo`
+- AppSecret：`hotelbyte_api_demo`
+
+演示环境公网可调，免注册。**仅**演示环境使用；生产请向 hotelbyte 申请 partner key。
