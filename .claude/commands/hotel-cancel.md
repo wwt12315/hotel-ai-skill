@@ -34,7 +34,6 @@ $ARGUMENTS
 支持的形态（Dry-run）：
 - `/hotel-cancel <customerReferenceNo> <supplierReferenceNo>` —— 基础用法
 - `/hotel-cancel <customerReferenceNo> <supplierReferenceNo> 客户临时取消` —— 加取消原因
-- `/hotel-cancel <customerReferenceNo> <supplierReferenceNo> --all` —— 同时取消同一 supplierReferenceNo 下所有订单
 
 真取消（加 `--confirm`）：
 - `/hotel-cancel <customerReferenceNo> <supplierReferenceNo> --confirm`
@@ -51,7 +50,6 @@ $ARGUMENTS
 | `supplierReferenceNo` | 是 | — | **从 `/hotel-book` 输出或 `.claude/orders/<uuid>.json` 拿**——这是酒店分配的 |
 | `reason` | 否 | "Customer request" | 取消原因（10-200 字） |
 | `--confirm` | 否 | false | 加这个标志才真取消 |
-| `--all` | 否 | false | 取消同一 supplierReferenceNo 下所有订单 |
 
 **两者都缺失或模糊**：反问一次，告诉用户从 `/hotel-book` 输出的"订单详情"复制。
 
@@ -66,6 +64,26 @@ $ARGUMENTS
 | 4 | Failed | 失败 | ❌（终态） |
 | 5 | CancelFailed | 取消失败 | ⚠️（要查原因重试） |
 
+## ⚠️ 演示环境实测注意
+
+实测发现 hotelbyte 演示 API 的 cancel / queryOrders 端点：
+
+- **`queryOrders` 空请求** `{}` 会返回**演示环境所有订单**（用于发现演示订单 ID）
+- **`queryOrders` 指定不存在的 customerReferenceNo**返回 `{"code": 0, "data": {"orders": []}}`
+- **`cancel` 调用**会先调 queryOrders 找订单，找不到直接返回 `{"code": 100000404, "msg": "failed to query order"}`
+
+**演示环境下**本命令的预期行为：
+- Dry-run 必定返回"订单不存在"或"已取消"（演示环境没有真实活动订单）
+- 真取消 `--confirm` 必然返回分支 C（404）
+
+**演示环境内唯一真实的订单**（用 `queryOrders` `{}` 实测发现的）：
+- `customerReferenceNo`: `E2E_TEST_1a05121d-77f4-4751-90a5-c09eb5e01138`
+- `supplierReferenceNo`: `71705286443857226`
+- `platformReferenceNo`: `71705286443857226`
+- `status`: 3（Cancelled）—— 已取消的订单，**不能再取消**（幂等）
+
+**真实生产环境**才能完整验证 status: 1 / 2 / 4 / 5 这些响应。
+
 ## 流程
 
 ### 步骤 1：解析自然语言
@@ -74,7 +92,7 @@ $ARGUMENTS
 - `customerReferenceNo`
 - `supplierReferenceNo`
 - `reason`
-- 是否有 `--confirm` / `--all` 标志
+- 是否有 `--confirm` 标志
 
 如果 `customerReferenceNo` 缺失：反问。
 如果 `supplierReferenceNo` 缺失：反问。
@@ -100,13 +118,13 @@ curl -sS -k -X POST -H "Content-Type: application/json" \
 curl -sS -k -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ST:..." \
-  -H "Session-Id: <session-id>"（建议从 `.claude/orders/<uuid>.json` 拿）
+  -H "Session-Id: <session-id>" \
   -H "Language: en-US" \
   -d '{"customerReferenceNos":["<customerReferenceNo>"]}' \
   https://api-test.hotelbyte.com/api/trade/queryOrders
 ```
 
-**解读状态**：
+**解读状态**（实测分支）：
 
 | 状态 | 处理 |
 |---|---|
@@ -116,6 +134,11 @@ curl -sS -k -X POST \
 | 3 (Cancelled) | 跳过取消，报告"已取消" |
 | 4 (Failed) | 跳过取消，报告"订单已失败" |
 | 5 (CancelFailed) | 重试取消——把它当正常订单再 cancel 一次 |
+
+**实测响应**：
+- 订单存在：`{"code": 0, "msg": "", "data": {"orders": [<订单>...]} }`
+- 订单不存在：`{"code": 0, "msg": "", "data": {"orders": []}}`
+- 空请求 `{}` 会返回演示环境所有订单
 
 ### 步骤 4：Dry-run（默认）—— 输出"准备取消"清单
 
@@ -187,7 +210,9 @@ curl -sS -k -X POST \
 
 ### 步骤 6：解读 cancel 响应（3 个分支）
 
-#### 分支 A：取消成功（`status: 3 = Cancelled`）
+#### 分支 A：取消成功（`status: 3 = Cancelled`）—— 真实生产环境
+
+**演示环境无法验证**。预期响应：
 
 ```json
 {
@@ -204,7 +229,9 @@ curl -sS -k -X POST \
 
 注意 `serviceFee` 是**供应商收的服务费**（不退还），customer 实际退款 = `totalRate - serviceFee`。
 
-#### 分支 B：取消失败（`status: 5 = CancelFailed`）
+#### 分支 B：取消失败（`status: 5 = CancelFailed`）—— 真实生产环境
+
+**演示环境无法验证**。预期响应：
 
 ```json
 {
@@ -237,27 +264,66 @@ curl -sS -k -X POST \
 
 **进入轮询**——可能需要 1-2 分钟供应商手工确认。
 
-#### 分支 C：订单不存在（`code: 100000404`）
+#### 分支 C：订单不存在（`code: 100000404`）—— **演示环境实测**
+
+**实测响应**（随便给一个不存在的 customerReferenceNo）：
 
 ```json
-{"code": 100000404, "msg": "not found"}
+{"code": 100000404, "msg": "failed to query order"}
 ```
+
+**含义**：cancel 内部先 queryOrders 找订单，找不到就返回 404。
 
 输出：
 
 ```markdown
 # ❌ 订单不存在
 
-API 返回 `code: 100000404`, `msg: "not found"`。
+API 返回 `code: 100000404`, `msg: "failed to query order"`。
 
 **可能原因**：
 - `customerReferenceNo` 输错
 - `supplierReferenceNo` 输错
-- 订单在演示环境 24 小时后被清理
+- 订单在演示环境已经被清理
+- 演示环境没有真实活动订单
+
+**演示环境 fallback**：
+- 用 `queryOrders` 发空请求 `{}` 可以获取演示环境所有订单
+- 演示环境内唯一真实订单（已取消状态 3）：
+  - customerReferenceNo: `E2E_TEST_1a05121d-77f4-4751-90a5-c09eb5e01138`
+  - supplierReferenceNo: `71705286443857226`
+  - 状态：3 (Cancelled) —— 取消幂等会跳过
 
 **建议**：
 - 检查两个 ID 是否从 `/hotel-book` 输出复制
 - 用 `/hotel-cancel --test` 跑 fixture 验证 toolchain
+- 在生产环境或已有真实订单的环境跑
+```
+
+不进入轮询。
+
+#### 分支 D：参数错误（`code: 100000400`）—— 演示环境实测
+
+**实测响应**（customerReferenceNo 和 supplierReferenceNo 都缺失）：
+
+```json
+{"code": 100000400, "msg": "order identifier is required"}
+```
+
+**含义**：cancel 强制要求至少一个订单标识。
+
+输出：
+
+```markdown
+# 参数错误
+
+API 返回 `code: 100000400`, `msg: "order identifier is required"`。
+
+**含义**：customerReferenceNo 和 supplierReferenceNo 都缺失。
+
+**建议**：
+- 提供 customerReferenceNo（从 /hotel-book 输出复制）
+- 或提供 supplierReferenceNo（同上）
 ```
 
 不进入轮询。
@@ -325,7 +391,7 @@ done
 - 修改订单：hotelbyte 测试 API 不支持 edit，只能"取消后重订"
 ```
 
-### 步骤 8：更新 `.claude/orders/<customerReferenceNo>.json`
+### 步骤 8：更新 `.claude/orders/<customerReferenceNo>.json`（仅分支 A 或 B 成功）
 
 更新本地订单快照：
 
@@ -349,11 +415,12 @@ done
 
 | 现象 | 处理 |
 |------|------|
-| `code: 0` + `status: 3` | 走 A 分支 → 轮询 |
-| `code: 0` + `status: 5` | 走 B 分支（取消失败） |
-| `code: 100000404` | 走 C 分支（订单不存在） |
+| `code: 0` + `status: 3` | 走 A 分支 → 轮询（**真实生产环境**） |
+| `code: 0` + `status: 5` | 走 B 分支（取消失败，**真实生产环境**） |
+| `code: 100000404` + msg "failed to query order" | 走 C 分支（订单不存在，**演示环境实测**） |
+| `code: 100000400` + msg "order identifier is required" | 走 D 分支（参数错，**演示环境实测**） |
+| `data.orders` 空数组 | 走 C 分支（订单不存在） |
 | 其他 `code != 0` | 走 E 分支（API 异常） |
-| 查询返回空数组 | 走 C 分支（订单不存在） |
 | `curl` 退出码非 0 | 重跑一次 + 报告 stderr |
 | `data.ticket` 缺失 | 检查 `msg`，可能是 appKey 失效 |
 | 两个 ID 看起来不对 | 反问："两个 ID 都是从 /hotel-book 输出的详情复制" |
@@ -364,12 +431,14 @@ done
 如果 `$ARGUMENTS` 含 `--test`，跑 Dry-run 输出（**不真取消**）：
 
 ```
-customerReferenceNo=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx（生成的随机 UUID）
+customerReferenceNo=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx（生成的随机 UUID，演示环境必然找不到）
 supplierReferenceNo=SUP12345（文档示例）
 reason="Customer request"
 ```
 
-输出顶部加 `[fixture] cancel dry-run`。用于演示取消流程。**不真取消**——演示环境库存稀缺，避免浪费。
+**演示环境下**：预期返回**分支 C（404）**——这是正常的，证明 toolchain 通了。
+
+输出顶部加 `[fixture] cancel dry-run`。用于演示取消流程。
 
 ## 不要做的事
 
@@ -382,7 +451,8 @@ reason="Customer request"
 
 ## 已知限制
 
-- 演示环境的取消通常对 status 2 (Confirmed) 订单有效，对 status 1 (Confirming) 也能取消（demo 几乎不会走到 status 2 因为库存稀缺）。
+- **演示环境的 cancel 必然失败**（返回 404 或 400）——演示环境没有真实活动订单。
+- 真实生产环境才能看到 → status 1 / 2 / 4 / 5 全部分支。
 - 取消是**不可逆**操作。**真实订单一旦确认取消，款项会进入退款流程（3-10 工作日）**。
 - 不支持"修改订单"（改日期、改房型）。如需这类操作，必须"取消后重订"，损失取消费。
 - 不支持"部分取消"（只取消订单的 1 间房）。一个订单要么全取消，要么不取消。
