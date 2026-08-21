@@ -25,7 +25,7 @@ allowed-tools: Bash(curl:*), Bash(date:*), Bash(uuidgen:*) , Bash(sleep:*)
 
 > **本机环境提示**：ZCode 自带 WebFetch 工具证书过期，无法直连 hotelbyte。本命令用 `curl`（Windows Schannel TLS 兼容），`allowed-tools` 已限定 `Bash(curl:*)` 和 `Bash(sleep:*)`（用于轮询）。
 
-> **安全约束**：本命令涉及**真实下单操作**。默认 Dry-run，加 `--confirm` 才执行。**演示环境的下单通常会失败**（库存稀缺），但仍会消耗一次酒店端的 API 配额——演示环境请慎重使用 `--confirm`。
+> **安全约束**：本命令涉及**真实下单操作**。默认 Dry-run，加 `--confirm` 才执行。**演示环境的 book 调用大概率失败**（ratePkgId 格式校验/session 创建限制），但仍会消耗一次酒店端的 API 配额——演示环境请慎重使用 `--confirm`。
 
 ## 用户输入
 
@@ -36,7 +36,7 @@ $ARGUMENTS
 支持的形态（Dry-run）：
 - `/hotel-book <ratePkgId> 张三 zhangsan@example.com` —— 1 间房 1 个客人
 - `/hotel-book <ratePkgId> 张三 zhangsan@example.com 2 rooms` —— 2 间房
-- `/hotel-book <ratePkgId> 张三 zhangsan@example.com 1 3` —— 1 间房 3 个客人（逗号分隔姓名）
+- `/hotel-book <ratePkgId> 张三 zhangsan@example.com 1 3` —— 1 间房 3 个客人
 
 真下单（加 `--confirm`）：
 - `/hotel-book <ratePkgId> 张三 zhangsan@example.com --confirm`
@@ -50,7 +50,7 @@ $ARGUMENTS
 | 字段 | 必填 | 默认 | 说明 |
 |---|---|---|---|
 | `ratePkgId` | 是 | — | 必须从 `/hotel-check-availability` 的成功响应来，**不能瞎编** |
-| `holder.firstName` | 是 | — | 预订联系人名（中文输入用拼音 + 英文） |
+| `holder.firstName` | 是 | — | 预订联系人名 |
 | `holder.lastName` | 是 | — | 预订联系人姓 |
 | `holder.email` | 否 | — | 邮箱（酒店发确认信） |
 | `guests[].firstName` | 是 | — | 入住客人名（每间房至少 1 个） |
@@ -58,14 +58,24 @@ $ARGUMENTS
 | `guests[].roomIndex` | 是 | — | 房间索引（**从 1 开始**） |
 | `customerReferenceNo` | 自动生成 | — | UUID4，**幂等键**——重复提交同一 ID 不会重复扣款 |
 | `roomCount` | 否 | 1 | 房间数 |
-| `guestCount` | 否 | 1 | 客人数（>1 时需要拆分到多个 guests） |
 | `--confirm` | 否 | false | 加这个标志才真下单 |
 
 **中文姓名处理**（**干跑阶段就要确认**）：
 - "张三" → `firstName: "San", lastName: "Zhang"`（拼音）
 - 用 `Bash(date:*)` 自带的 LLM 拼音能力不强，**反问用户确认拼音写法**——CJK 字符传给酒店可能拒收
 
-**`ratePkgId` 缺失或模糊**：反问一次。它是长字符串（如 `RP461850557-1234567890`），从 `/hotel-check-availability` 的输出复制。
+**`ratePkgId` 缺失或模糊**：反问一次。它是长字符串（实测格式如 `10000000<HB>-1<HB>SIM|2|CERT_FAM|RO|RF|1787241886|20260919|20260921`），从 `/hotel-check-availability` 的输出复制。
+
+## ⚠️ 演示环境实测注意
+
+实测发现 hotelbyte 演示 API 的 book 端点：
+- **ratePkgId 格式校验**：`10000000<HB>-1<HB>SIM|2|CERT_FAM|RO|RF|1787241886|20260919|20260921` 这种格式才被接受
+- **Session-Id 校验**：必须跟 `/hotel-check-availability` 用同一个 Session-Id
+- **演示环境**的 hotelList 永远 no_availability，不会创建 session → book 调用必然失败
+
+**演示环境下** book 调用大概率返回**分支 D（400 参数错误）** 或 **分支 E（404 session）**。
+
+**真实生产环境**才能完整验证 status: 1 / status: 2 / status: 4 / status: 5 这些响应。
 
 ## 流程
 
@@ -107,7 +117,7 @@ CUSTOMER_REF=$(uuidgen)
 ```markdown
 # 🛒 准备下单（Dry-run，未执行）
 
-**酒店**：<hotelId>（建议跑 `/hotel-detail` 拿酒店名）
+**酒店**：<hotelId>（建议跑 `/hotel-search` 拿酒店名）
 **报价**：<ratePkgId>
 **价格**：<显示讲解：从 checkAvail 的 snapshot 来>
 
@@ -136,7 +146,7 @@ CUSTOMER_REF=$(uuidgen)
 - 改房间数：`/hotel-book <ratePkgId> 张三 zhangsan@example.com 2 rooms --confirm`
 - 改客人姓名：`/hotel-book <ratePkgId> 李四 lisi@example.com --confirm`
 
-> ⚠️ 演示环境提示：hotelbyte 演示库存稀缺，下单大概率会失败（返回 `no_availability` 或 `ARI changed`）。这是正常的——证明整个下单流程在跑，不是 bug。
+> ⚠️ 演示环境提示：hotelbyte 演示 API 必然返回 400 或 404 分支（ratePkgId 格式校验 / session 不存在）。这是预期的——证明整个下单流程在跑，不是 bug。
 ```
 
 **Dry-run 模式到此结束**——**不调 `/api/trade/book`**，不消耗对方 API 配额。
@@ -189,7 +199,7 @@ curl -sS -k -X POST \
   -H "Currency: USD" \
   -d '{
     "customerReferenceNo": "<uuid>",
-    "ratePkgId": "RP461850557-1234567890",
+    "ratePkgId": "10000000<HB>-1<HB>SIM|2|CERT_FAM|RO|RF|1787241886|20260919|20260921",
     "holder": {"firstName":"San","lastName":"Zhang","email":"zhangsan@example.com"},
     "guests": [{"roomIndex":1,"firstName":"San","lastName":"Zhang"}]
   }' \
@@ -198,7 +208,9 @@ curl -sS -k -X POST \
 
 ### 步骤 6：解读 book 响应（5 个分支）
 
-#### 分支 A：下单成功（`status: 1 = Confirming` 或 `status: 2 = Confirmed`）
+#### 分支 A：下单成功（`status: 1 = Confirming` 或 `status: 2 = Confirmed`）—— 真实生产环境
+
+**演示环境无法验证**。预期响应结构（从 Apifox 文档）：
 
 ```json
 {
@@ -218,21 +230,8 @@ curl -sS -k -X POST \
       "supplierReferenceNo": "SUP12345",
       "netRate": {"currency": "USD", "amount": 555.00},
       "grossRate": {"currency": "USD", "amount": 600.00},
-      "hotel": {
-        "hotelId": "461850557",
-        "name": {"en": "Hotel Gracery Shinjuku", "zh": "新宿格拉斯丽酒店"},
-        "address": {"en": "1-19-1 Kabukicho, Shinjuku", "zh": "新宿区歌舞伎町1-19-1"}
-      },
-      "rooms": [
-        {
-          "roomTypeId": "RT001",
-          "ratePkgId": "RP461850557-1234567890",
-          "checkIn": "2026-08-28",
-          "checkOut": "2026-08-30",
-          "rate": {"netRate": {"currency": "USD", "amount": 185.00}},
-          "totalRate": {"netRate": {"currency": "USD", "amount": 555.00}}
-        }
-      ]
+      "hotel": {"hotelId": "...", "name": {"en": "...", "zh": "..."}, "address": {...}},
+      "rooms": [{"roomTypeId": "...", "ratePkgId": "...", "checkIn": "...", "checkOut": "...", "rate": {...}, "totalRate": {...}}]
     }
   }
 }
@@ -240,7 +239,9 @@ curl -sS -k -X POST \
 
 **拿到 `status: 1` 后立即进入轮询**（步骤 7）。
 
-#### 分支 B：ARI 变更（`code: 100001111`）
+#### 分支 B：ARI 变更（`code: 100001111`）—— 真实生产环境
+
+**演示环境无法验证**。预期响应：
 
 ```json
 {"code": 100001111, "msg": "ARI changed"}
@@ -263,29 +264,42 @@ API 返回 `code: 100001111`。
 
 不进入轮询。
 
-#### 分支 C：参数错误（`code: 100000400`）
+#### 分支 C：参数错误（`code: 100000400`）—— 演示环境实测过
 
+**实测响应**：
 ```json
-{"code": 100000400, "msg": "ratePkgId is required"}
+{"code": 100000400, "msg": "ratePkgId validation failed at RP461850557-1234567890: invalid ratePkgId format: RP461850557-1234567890"}
 ```
 
-直接报告。不进入轮询。
+或：
+```json
+{"code": 100000400, "msg": "param error"}
+```
 
-#### 分支 D：下单失败（`status: 4 = Failed`）
+输出：
+
+```markdown
+# 参数错误
+
+API 返回 `code: 100000400`, `msg: "ratePkgId validation failed at <ratePkgId>: invalid ratePkgId format"`。
+
+**含义**：ratePkgId 是假的或格式错。
+
+**演示环境下**：用 `/hotel-search` 永远返回 no_availability 拿不到真实 ratePkgId，所以演示环境必然返回本分支。**这是正常的**，证明 toolchain 跑通了。
+
+**生产环境**：
+- 重新跑 `/hotel-search` 拿真实 ratePkgId
+- 用真实 ratePkgId 重新 `/hotel-check-availability` → `/hotel-book --confirm`
+```
+
+不进入轮询。
+
+#### 分支 D：下单失败（`status: 4 = Failed`）—— 真实生产环境
+
+**演示环境无法验证**。预期响应：
 
 ```json
-{
-  "code": 0,
-  "msg": "",
-  "data": {
-    "hotelOrder": {
-      "status": 4,
-      "statusRemark": "供应商拒绝预订",
-      "platformReferenceNo": "PLT202608210001234",
-      "customerReferenceNo": "abcdef-..."
-    }
-  }
-}
+{"code": 0, "msg": "", "data": {"hotelOrder": {"status": 4, "statusRemark": "供应商拒绝预订", "platformReferenceNo": "PLT...", "customerReferenceNo": "..."}}}
 ```
 
 输出：
@@ -299,7 +313,7 @@ API 返回 `code: 100001111`。
 - statusRemark：<原因>
 
 **可能原因**：
-- 演示环境的库存已清空（最常见）
+- 库存已清空（最常见）
 - 供应商主动拒绝（信用卡、超售、价格不匹配）
 
 **建议**：
@@ -309,9 +323,25 @@ API 返回 `code: 100001111`。
 
 不进入轮询（4 = Failed 是终态）。
 
-#### 分支 E：取消失败（`status: 5 = CancelFailed`）
+#### 分支 E：401 / 404 / 500 等其他错误
 
-不会出现在 book 响应里（book 时还没取消）。如果出现，是 bug，记下上报。
+```markdown
+# API 请求失败
+
+API 返回 `code: <code>`, `msg: "<msg>"`。
+
+**演示环境下常见**：
+- 401 Unauthorized：ticket 过期
+- 404 Not Found：session 不存在
+- 500 Server Error：上游服务故障
+
+**建议**：
+- 401 → 重新换 ticket，再重试
+- 404 → 重新跑 `/hotel-search` 创建 session
+- 500 → 等 30 秒重试
+```
+
+不进入轮询。
 
 ### 步骤 7：轮询订单状态（仅分支 A 触发）
 
@@ -372,10 +402,9 @@ done
 
 **下一步**：
 - 取消订单：`/hotel-cancel <customerReferenceNo> <supplierReferenceNo> [reason]`
-- 查询订单：`/hotel-cancel` 文档里有重新查询的说明
 ```
 
-### 步骤 8：写入 `.claude/orders/<customerReferenceNo>.json`（仅 `--confirm` 模式）
+### 步骤 8：写入 `.claude/orders/<customerReferenceNo>.json`（仅 `--confirm` 模式 + 仅分支 A 成功）
 
 保存订单快照到本地，便于后续 `/hotel-cancel` 用：
 
@@ -403,10 +432,11 @@ done
 
 | 现象 | 处理 |
 |------|------|
-| `code: 0` + `status: 1` | 走 A 分支 → 轮询 |
-| `code: 0` + `status: 4` | 走 D 分支（失败） |
-| `code: 100001111` | 走 B 分支（ARI 变更） |
-| `code: 100000400` | 走 C 分支（参数错） |
+| `code: 0` + `status: 1` | 走 A 分支 → 轮询（**真实生产环境**） |
+| `code: 0` + `status: 4` | 走 D 分支（失败，**真实生产环境**） |
+| `code: 100001111` | 走 B 分支（ARI 变更，**真实生产环境**） |
+| `code: 100000400` | 走 C 分支（参数错，**演示环境实测**） |
+| `code: 100000404` | 走 E 分支（session 不存在，**演示环境实测**） |
 | 其他 `code != 0` | 走 E 分支（API 异常） |
 | `curl` 退出码非 0 | 重跑一次 + 报告 stderr |
 | `data.ticket` 缺失 | 检查 `msg`，可能是 appKey 失效 |
@@ -418,7 +448,7 @@ done
 如果 `$ARGUMENTS` 含 `--test`，跑 Dry-run 输出（**不真下单**）：
 
 ```
-ratePkgId=RP461850557-1234567890（文档示例）
+ratePkgId=10000000<HB>-1<HB>SIM|2|CERT_FAM|RO|RF|1787241886|20260919|20260921（演示环境真实订单的 ratePkgId）
 holder=张三 zhangsan@example.com
 1 间房 1 个客人
 ```
@@ -432,10 +462,11 @@ holder=张三 zhangsan@example.com
 - **不要把演示凭据 `hotelbyte_api_demo` 写进任何文件 / 文档 / commit**
 - **不要用 `Bash(*)` 宽权限**——本命令只能调 `curl` / `date` / `uuidgen` / `sleep`
 - **不要把 ticket 持久化到 `.claude/memory.db`**
-- **不要硬编码中文姓名** —— 中文字符传给酒店可能拒收，**反问用户拼音**
+- **不要硬编码中文姓名** —— CJK 字符传给酒店可能拒收，**反问用户拼音**
 
 ## 已知限制
 
-- 演示环境库存稀缺，**真下单大概率失败**（返回 `no_availability` 或 `ARI changed` 或 `Failed`）。这是预期的——证明整个流程在跑。
+- **演示环境的 book 调用必然失败**（返回 400 或 404）——这是实测结论，演示环境没有真实库存 + session 缺位。
+- 真实生产环境才能看到 → status 1 / 2 / 4 / 5 全部分支。
 - 轮询超时 3 分钟。**真实的 confirm 可能需要 5-15 分钟**（供应商人工审单）。如果超时，保留 `customerReferenceNo` 让用户用 hotelbyte 客服或 `/hotel-cancel` 验证。
 - 中文姓名 → 拼音的转换依赖 LLM 能力，**不保证准确**。商用场景建议让客户在网页上自行输入。
