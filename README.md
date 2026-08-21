@@ -1,8 +1,8 @@
 # hotel-ai-skill
 
-一个让 AI 直接帮客户**搜索、详情、预订、取消酒店**的 Claude Code slash command 集合，对接 [hotelbyte](https://github.com/hotelbyte-com) 公开测试 API。
+让 AI 直接帮客户**搜索、预订、取消酒店**的 Claude Code slash command 集合，对接 [hotelbyte](https://github.com/hotelbyte-com) 公开测试 API。
 
-> 起源：参考 zread.ai / TourMind 之类的"AI 直接订酒店"产品形态，做一个最小可运行版本，覆盖**搜索 → 详情 → 验证 → 下单 → 取消**完整闭环。
+> 起源：参考 zread.ai / TourMind 之类的"AI 直接订酒店"产品形态，做一个最小可运行版本，覆盖**搜索 → 验证 → 下单 → 取消**完整闭环。
 
 ## 这个仓库里有什么
 
@@ -13,7 +13,6 @@ hotel-ai-skill/
 │   └── commands/
 │       ├── hello.md                       # /hello —— smoke test
 │       ├── hotel-search.md                # /hotel-search —— 自然语言搜索
-│       ├── hotel-detail.md                # /hotel-detail —— 房型 + 价格 + 取消政策
 │       ├── hotel-check-availability.md    # /hotel-check-availability —— 下单前预检
 │       ├── hotel-book.md                  # /hotel-book —— 下单（默认 Dry-run）
 │       └── hotel-cancel.md                # /hotel-cancel —— 取消订单（默认 Dry-run）
@@ -23,16 +22,17 @@ hotel-ai-skill/
         └── run-fixture.ps1                # PowerShell 5.1 fixture 脚本
 ```
 
-## 5 个 slash command 一览
+## 4 个 slash command 一览
 
-| 命令 | 触发时机 | 端点 | 副带会话 |
+| 命令 | 触发时机 | 端点 | 关键输出 |
 |---|---|---|---|
 | `/hello` | 验证 Claude Code 项目级 command 能识别 | — | smoke test |
-| `/hotel-search <自然语言>` | 起点 | `POST /api/auth/ticket` + `POST /api/search/hotelList` | 拿 hotelId |
-| `/hotel-detail <hotelId>` | 搜索后 | `POST /api/search/hotelStaticDetail` | 拿 ratePkgId |
-| `/hotel-check-availability <ratePkgId>` | 详情后、下单前 | `POST /api/search/checkAvail` | 拿价格 snapshot |
+| `/hotel-search <自然语言>` | 起点 | `POST /api/auth/ticket` + `POST /api/search/hotelList` | hotelId + `ratePkgId`（关键） |
+| `/hotel-check-availability <ratePkgId>` | 搜索后、下单前 | `POST /api/search/checkAvail` | 价格 snapshot（status: 1 = 可订） |
 | `/hotel-book <ratePkgId> <姓名> <email> [--confirm]` | 验证后 | `POST /api/trade/book` + 轮询 `/api/trade/queryOrders` | 真下单 |
 | `/hotel-cancel <customerRef> <supplierRef> [--confirm]` | 任何时候 | `POST /api/trade/cancel` + 轮询 `/api/trade/queryOrders` | 取消订单 |
+
+> ⚠️ **设计决策**：`/hotel-detail` 端点（`/api/search/hotelStaticDetail`）已被实测证明**只返回酒店静态信息**（名 / 地址 / 坐标 / minPrice），**不包含房型 / ratePkgId**。功能完全被 `/hotel-search` 输出覆盖，因此本 skill 集合**不包含** `/hotel-detail`。
 
 ## 完整使用流程
 
@@ -40,11 +40,7 @@ hotel-ai-skill/
 用户：在 Claude Code 里输入
    /hotel-search 我下周五去东京，2 晚，2 个大人，预算每晚 200 美元以内，要 4 星以上
                                     ↓
-                           拿到 hotelId 列表
-                                    ↓
-   /hotel-detail 461850557
-                                    ↓
-                           拿到 5 个房型 + ratePkgId
+                           拿到酒店列表 + 每家酒店的 rooms[].rates[].ratePkgId
                                     ↓
    /hotel-check-availability RP461850557-1234567890
                                     ↓
@@ -69,7 +65,7 @@ hotel-ai-skill/
 
 | 能做 | 不能做 |
 |---|---|
-| 5 个 slash command 覆盖搜索→详情→预检→下单→取消 | 改订单（改日期 / 改房型）——只能"取消后重订" |
+| 4 个 slash command 覆盖搜索→预检→下单→取消 | 改订单（改日期 / 改房型）——只能"取消后重订" |
 | 自然语言查询（中文 / 英文 / 相对日期） | 部分取消（只取消订单的 1 间房） |
 | Dry-run 默认 + `--confirm` 真下单 + 轮询验证 | 真实下单场景（演示环境库存稀缺） |
 | 任意 Claude Code 项目里通过 `.claude/commands/` 项目级生效 | 在裸 bash / 其他 CLI（不走 Claude Code）生效 |
@@ -95,7 +91,6 @@ claude
 
 > /hello                                                 # smoke test
 > /hotel-search Tokyo 20260828 20260830 2 200 4          # happy path
-> /hotel-detail 461850557                                # 详情
 > /hotel-check-availability RP461850557-1234567890       # 验证
 > /hotel-book RP461850557-1234567890 张三 zhangsan@example.com        # Dry-run
 > /hotel-book RP461850557-1234567890 张三 zhangsan@example.com --confirm  # 真下单
@@ -130,7 +125,7 @@ claude
 ## 已知限制
 
 1. **TLS 证书**：hotelbyte 测试 API 证书可能过期，脚本用 `curl -k`（Schannel 兼容）跳过校验。
-2. **测试 API 无真实库存**：`POST /api/search/hotelList` 在测试环境**始终**返回 `no_availability` 分支，**真下单大概率失败**。这不是 bug，是预期——证明整个 happy path + 兜底分支都通。
+2. **测试 API 无真实库存**：`POST /api/search/hotelList` 在测试环境**始终**返回 `no_availability` 分支，**真下单/验证/取消都需要真实 ratePkgId**。演示环境能验证的只是错误分支（404 / 格式校验），真实路径需在生产环境/有库存环境验证。
 3. **自然语言日期**：相对日期（"下周五"、"明天"）解析由 LLM 完成，复杂度受模型能力限制。模糊时建议用绝对日期（`YYYYMMDD`）。
 4. **中文姓名**：传给酒店前必须**拼音化**（CJK 字符可能被拒）。`/hotel-book` 会反问一次确认。
 5. **演示环境轮询**：每 10 秒一次，最多 18 次（3 分钟）。真实 confirm 可能需要 5-15 分钟，演示环境超时正常。
