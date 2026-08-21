@@ -1,77 +1,125 @@
-# hotel-search-skill
+# hotel-ai-skill
 
-一个让 AI 直接帮客户搜索酒店（甚至预订）的 Claude Code slash command MVP，对接 [hotelbyte](https://github.com/hotelbyte-com) 公开测试 API。
+一个让 AI 直接帮客户**搜索、详情、预订、取消酒店**的 Claude Code slash command 集合，对接 [hotelbyte](https://github.com/hotelbyte-com) 公开测试 API。
 
-> 起源：参考 zread.ai / TourMind 之类的"AI 直接订酒店"产品形态，做一个最小可运行版本。
+> 起源：参考 zread.ai / TourMind 之类的"AI 直接订酒店"产品形态，做一个最小可运行版本，覆盖**搜索 → 详情 → 验证 → 下单 → 取消**完整闭环。
 
 ## 这个仓库里有什么
 
 ```
-hotel-search-skill/
+hotel-ai-skill/
+├── README.md                          # 你正在看的这份文档
 ├── .claude/
 │   └── commands/
-│       ├── hotel-search.md        # 核心：/hotel-search slash command
-│       └── hello.md               # smoke test：验证 Claude Code 项目级 command 工作正常
+│       ├── hello.md                       # /hello —— smoke test
+│       ├── hotel-search.md                # /hotel-search —— 自然语言搜索
+│       ├── hotel-detail.md                # /hotel-detail —— 房型 + 价格 + 取消政策
+│       ├── hotel-check-availability.md    # /hotel-check-availability —— 下单前预检
+│       ├── hotel-book.md                  # /hotel-book —— 下单（默认 Dry-run）
+│       └── hotel-cancel.md                # /hotel-cancel —— 取消订单（默认 Dry-run）
 └── docs/
     └── skill-outputs/
-        ├── hotel-search.md        # 使用说明 + 已知限制
-        └── run-fixture.ps1        # PowerShell 5.1 fixture 脚本（手把手跑一遍 happy path）
+        ├── hotel-search.md                # /hotel-search 详细使用文档
+        └── run-fixture.ps1                # PowerShell 5.1 fixture 脚本
 ```
 
-## 一句话能干什么
+## 5 个 slash command 一览
 
-在 Claude Code 里输入：
+| 命令 | 触发时机 | 端点 | 副带会话 |
+|---|---|---|---|
+| `/hello` | 验证 Claude Code 项目级 command 能识别 | — | smoke test |
+| `/hotel-search <自然语言>` | 起点 | `POST /api/auth/ticket` + `POST /api/search/hotelList` | 拿 hotelId |
+| `/hotel-detail <hotelId>` | 搜索后 | `POST /api/search/hotelStaticDetail` | 拿 ratePkgId |
+| `/hotel-check-availability <ratePkgId>` | 详情后、下单前 | `POST /api/search/checkAvail` | 拿价格 snapshot |
+| `/hotel-book <ratePkgId> <姓名> <email> [--confirm]` | 验证后 | `POST /api/trade/book` + 轮询 `/api/trade/queryOrders` | 真下单 |
+| `/hotel-cancel <customerRef> <supplierRef> [--confirm]` | 任何时候 | `POST /api/trade/cancel` + 轮询 `/api/trade/queryOrders` | 取消订单 |
+
+## 完整使用流程
 
 ```
-/hotel-search 我下周五去东京，2 晚，2 个大人，预算每晚 200 美元以内，要 4 星以上
+用户：在 Claude Code 里输入
+   /hotel-search 我下周五去东京，2 晚，2 个大人，预算每晚 200 美元以内，要 4 星以上
+                                    ↓
+                           拿到 hotelId 列表
+                                    ↓
+   /hotel-detail 461850557
+                                    ↓
+                           拿到 5 个房型 + ratePkgId
+                                    ↓
+   /hotel-check-availability RP461850557-1234567890
+                                    ↓
+                           拿到价格 snapshot（status: 1 = 可订）
+                                    ↓
+   /hotel-book RP461850557-1234567890 张三 zhangsan@example.com
+                                    ↓
+                           输出"准备下单"清单（Dry-run，不真下单）
+                                    ↓
+   /hotel-book RP461850557-1234567890 张三 zhangsan@example.com --confirm
+                                    ↓
+                           调 /api/trade/book + 轮询 /api/trade/queryOrders
+                                    ↓
+                           拿到 platformReferenceNo / supplierReferenceNo
+                                    ↓
+   /hotel-cancel <customerRef> <supplierRef> --confirm
+                                    ↓
+                           取消订单
 ```
 
-Claude 会：
-
-1. 解析自然语言 → 拿到 `destination / checkIn / checkOut / adultCount / currency / price / starRating`
-2. 用 hotelbyte 公开测试凭据换 ticket（`POST /api/auth/ticket`）
-3. 调酒店列表搜索（`POST /api/search/hotelList`），按 hotelId 去重 + minPrice 升序挑前 5–8 家
-4. 输出 Markdown 表格 + 自然语言解读 + 推荐结论
-
-## 当前阶段的能力边界（明确告诉你能/不能做什么）
+## 当前阶段的能力边界
 
 | 能做 | 不能做 |
 |---|---|
-| 搜索酒店（按城市、日期、人数、价格、星级） | 直接下单（`/hotel-book` 是下一阶段） |
-| 解析自然语言查询（中文/英文、相对日期） | 真实下单后改单/取消（`queryOrders` / `cancel`） |
-| 把 API 返回结构化成易读解读 | 行程规划、机票、打包清单（另立项） |
-| 在任意 Claude Code 项目里通过 `.claude/commands/` 项目级生效 | 不在 Claude Code 之外的 CLI（如裸 bash）直接生效 |
-
-下一阶段会加 `/hotel-detail` 看房型详情、`/hotel-book` 下单 + 轮询订单状态。
+| 5 个 slash command 覆盖搜索→详情→预检→下单→取消 | 改订单（改日期 / 改房型）——只能"取消后重订" |
+| 自然语言查询（中文 / 英文 / 相对日期） | 部分取消（只取消订单的 1 间房） |
+| Dry-run 默认 + `--confirm` 真下单 + 轮询验证 | 真实下单场景（演示环境库存稀缺） |
+| 任意 Claude Code 项目里通过 `.claude/commands/` 项目级生效 | 在裸 bash / 其他 CLI（不走 Claude Code）生效 |
+| 公开测试凭据（hotelbyte_api_demo） | 真实生产凭据（你自己申请 partner key） |
 
 ## 安全约束（设计时就内嵌了）
 
-- **narrow permissions**：slash command 只允许 `Bash(curl:*)` / `Bash(date:*)` / `Bash(uuidgen:*)`，绝不开放 `Bash(*)` 全权限
+- **narrow permissions**：每个 slash command 只允许 `Bash(curl:*)` / `Bash(date:*)` / `Bash(uuidgen:*)`，**绝不**开放 `Bash(*)` 全权限
+- **narrow permissions（book / cancel）**：`Bash(curl:*)` / `Bash(date:*)` / `Bash(uuidgen:*)` / `Bash(sleep:*)`（用于轮询）
+- **Dry-run by default**：`/hotel-book` 和 `/hotel-cancel` 默认干跑，**必须**加 `--confirm` 才真下单 / 真取消
 - **不持久化 ticket**：ticket 只活在当次 session，不写 `.claude/memory.db`、不进 commit
-- **公开凭据**：用的是 hotelbyte 公开测试凭据（`api-test.hotelbyte.com` 免注册），不涉及真实账号密钥
+- **本地订单快照**：写 `.claude/orders/<uuid>.json`（**不**进 memory.db）
+- **公开凭据**：演示用的是 hotelbyte 公开测试凭据（`api-test.hotelbyte.com` 免注册），不涉及真实账号密钥
 - **不改后端**：本仓库纯新增文件，不修改 `hotel-be` / `hotel-fe` / `sdk-go` 等任何 submodule
 
 ## 怎么本地验证
 
-### 方法一：在 Claude Code 里跑
+### 方法一：在 Claude Code 里跑完整流程
 
 ```bash
 # 在项目根目录
 claude
 
-> /hello                                      # smoke test
-> /hotel-search Tokyo 20260828 20260830 2 200 4   # happy path
-> /hotel-search 北京 下周五 2晚 2人               # 中文 + 相对日期
+> /hello                                                 # smoke test
+> /hotel-search Tokyo 20260828 20260830 2 200 4          # happy path
+> /hotel-detail 461850557                                # 详情
+> /hotel-check-availability RP461850557-1234567890       # 验证
+> /hotel-book RP461850557-1234567890 张三 zhangsan@example.com        # Dry-run
+> /hotel-book RP461850557-1234567890 张三 zhangsan@example.com --confirm  # 真下单
+> /hotel-cancel <customerRef> <supplierRef> --confirm    # 取消
 ```
 
-### 方法二：用 PowerShell fixture 脚本
+### 方法二：用 PowerShell fixture 脚本（不依赖 Claude Code）
 
 ```powershell
-# 不需要 Claude Code，直接看 API 行为
 .\docs\skill-outputs\run-fixture.ps1
 ```
 
 预期输出：拿到 `ticket`，然后 `no_availability`（测试 API 无真实库存，符合预期）。
+
+## 6 步状态机（OrderStatus 文档 §OrderStatus）
+
+| 值 | 名称 | 含义 | 可取消？ |
+|---|---|---|---|
+| 0 | Unknown | 未知（不应该出现） | ❌ |
+| 1 | Confirming | 等待供应商确认 | ✅（趁还没确认） |
+| 2 | Confirmed | 已确认 | ✅（**可能要付取消费**） |
+| 3 | Cancelled | 已取消 | ❌（幂等） |
+| 4 | Failed | 失败 | ❌（终态） |
+| 5 | CancelFailed | 取消失败 | ⚠️（重试） |
 
 ## 环境
 
@@ -81,15 +129,18 @@ claude
 
 ## 已知限制
 
-1. **TLS 证书**：hotelbyte 测试 API 证书可能过期，脚本用 `curl -k`（Schannel 兼容）跳过校验。如要严格校验证书，需要 hotelbyte 续期。
-2. **测试 API 无真实库存**：`POST /api/search/hotelList` 在测试环境**始终**返回 `no_availability` 分支。这不是 bug，是预期——证明整个 happy path + 兜底分支都通。
+1. **TLS 证书**：hotelbyte 测试 API 证书可能过期，脚本用 `curl -k`（Schannel 兼容）跳过校验。
+2. **测试 API 无真实库存**：`POST /api/search/hotelList` 在测试环境**始终**返回 `no_availability` 分支，**真下单大概率失败**。这不是 bug，是预期——证明整个 happy path + 兜底分支都通。
 3. **自然语言日期**：相对日期（"下周五"、"明天"）解析由 LLM 完成，复杂度受模型能力限制。模糊时建议用绝对日期（`YYYYMMDD`）。
+4. **中文姓名**：传给酒店前必须**拼音化**（CJK 字符可能被拒）。`/hotel-book` 会反问一次确认。
+5. **演示环境轮询**：每 10 秒一次，最多 18 次（3 分钟）。真实 confirm 可能需要 5-15 分钟，演示环境超时正常。
 
-## 参考
+## 设计参考
 
-- hotelbyte 公开测试 API 文档：`https://api-test.hotelbyte.com`
-- 设计参考：zread.ai、TourMind（AI 直接订酒店的产品形态）
+- hotelbyte 公开测试 API 文档：https://openapi.hotelbyte.com
+- hotelbyte 测试 API：`https://api-test.hotelbyte.com`
+- 产品形态参考：zread.ai、TourMind（AI 直接订酒店的产品形态）
 
 ## License
 
-私有仓库，仅供内部演示。
+私有仓库（虽然目前是 public 状态）。代码仅供内部演示。
