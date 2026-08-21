@@ -83,6 +83,24 @@ $ARGUMENTS
 
 **真实生产环境**才能完整验证 status: 1 / 2 / 4 / 5 这些响应。
 
+### 2026-08-21 重测补充：queryOrders 过滤字段实测
+
+实测 queryOrders 的 4 种 filter body 形态：
+
+| 请求体 | 演示环境响应（HTTP 200, code:0） | 解读 |
+|---|---|---|
+| `{}` | `orders[]` 含全部 100 条 demo 订单（251 KB） | 不过滤 |
+| `{"customerReferenceNos":["E2E_TEST_..."]}` | `orders[]` 含 1 条匹配订单（2.5 KB） | **过滤生效** ✓ |
+| `{"customerReferenceNos":["FAKE-..."]}` | `orders[]` 空数组（40 B） | 过滤生效，无匹配 |
+| `{"supplierReferenceNos":["71705286443857226"]}` | `orders[]` 含 1 条匹配订单（2.5 KB） | **过滤生效** ✓ |
+| `{"supplierReferenceNo":"71705286443857226"}` | `orders[]` 含全部 100 条（251 KB） | **过滤被忽略**（单数字段名 hotelbyte 不识别） |
+
+**结论**：
+- `customerReferenceNos` 和 `supplierReferenceNos`（**复数 + 数组**）都生效
+- `customerReferenceNo` / `supplierReferenceNo`（**单数**）被忽略，会返回全部订单
+- 本 SKILL.md 步骤 3 用的是 `customerReferenceNos`（数组），符合 hotelbyte 规范
+- 想用 `supplierReferenceNo` 时务必改为 `supplierReferenceNos`（复数）
+
 ## 流程
 
 ### 步骤 1：解析自然语言
