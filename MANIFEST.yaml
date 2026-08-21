@@ -1,0 +1,218 @@
+# Agent-tool-agnostic manifest for hotel-ai-skill
+#
+# Schema follows the hotelbyte canonical skill protocol
+# (`.shared/skills/<skill-name>/SKILL.md` + DISCOVERY.md three-layer model):
+#
+#   1. Canonical source-of-truth: <repo>/skills/<skill-name>/SKILL.md
+#   2. Full-tree symlink layer (per-agent): handled by each agent's discovery
+#      adapter when this repo is registered as a skill source
+#   3. Allowlist layer (per-agent): handled by `.cursor/skills`,
+#      `.claude/skills`, `.codex/skills`, `.github/skills` on the consuming side
+#
+# This MANIFEST.yaml provides a single, structured, agent-agnostic index so any
+# tool can consume this skill pack without needing to parse Markdown frontmatter
+# or walk the directory tree. Tools SHOULD prefer this manifest over directory
+# walking; tools MUST NOT rely on Claude-Code-only frontmatter fields such as
+# `allowed-tools` or `argument-hint`.
+#
+# Compatibility: hotelbyte `agent-dev-contract` v2.0 Pattern 1 (Prompt Chaining),
+# Pattern 5 (Tool Use), Pattern 13 (Human-in-the-Loop).
+
+version: 1
+schema: hotelbyte-skill-pack/v1
+canonical_root: ./skills
+protocol_notes:
+  - "SKILL.md files use Markdown YAML frontmatter with two fields: `name` + `description`. `disable-model-invocation: true` is supported and means user-invoke only."
+  - "Agent-specific tooling hints (`allowed-tools`, `argument-hint`) live inside SKILL.md body, NOT in frontmatter, so the protocol stays portable."
+  - "Each skill declares its required external commands in `tooling.required_commands`. Mapping to any agent's permission model is the consumer's responsibility."
+  - "Safety contract is per-skill. Skills that mutate remote state (book, cancel) are `dry_run_by_default: true` and require explicit `--confirm` flag."
+
+skills:
+  - name: hotel-search
+    path: ./skills/hotel-search/SKILL.md
+    invoke: model-invoked      # agent may fire on its own when description matches
+    user_invocable: true      # user can also type the skill name directly
+    description: |
+      用自然语言搜索酒店（hotelbyte 测试 API）。支持模糊输入如
+      "东京下周五 2 晚 2 人预算 200"，自动换 ticket 并返回带解读的酒店列表。
+    triggers:
+      - "搜酒店"
+      - "找酒店"
+      - "查一下酒店"
+      - "hotel search"
+      - "find hotel"
+    inputs:
+      type: object
+      properties:
+        destination: { type: string, required: true,  description: "城市名或目的地 ID" }
+        checkIn:     { type: string, required: false, description: "YYYYMMDD, 默认今天+7 天" }
+        checkOut:    { type: string, required: false, description: "YYYYMMDD, 默认 checkIn+2 天" }
+        adultCount:  { type: integer,required: false, description: "默认 2" }
+        childrenCount:{type: integer,required: false, description: "默认 0" }
+        currency:    { type: string, required: false, description: "ISO 4217, 默认 USD" }
+        language:    { type: string, required: false, description: "IETF BCP 47, 中文输入默认 zh-CN" }
+        minStarRating:{type: integer,required: false, description: "0-5, 默认 0" }
+        priceLow:    { type: integer,required: false, description: "默认 0" }
+        priceHigh:   { type: integer,required: false, description: "默认 99999" }
+        test:        { type: boolean,required: false, description: "用 Tokyo 标准 fixture" }
+    outputs:
+      type: object
+      properties:
+        hotels:        { type: array,  description: "命中的酒店列表" }
+        no_availability: { type: boolean, description: "演示环境常见：API 返回 status=failed / reason=no_availability" }
+        correlationId: { type: string, description: "可用于向 hotelbyte 支持团队核查请求" }
+    side_effects:
+      - "issues POST /api/auth/ticket (token acquisition)"
+      - "issues POST /api/search/hotelList (read-only)"
+    dry_run_by_default: true   # read-only skill; default is also the only mode
+    requires_confirm: false
+    tooling:
+      required_commands: [curl, date, uuidgen]
+      claude_code_allowed_tools: "Bash(curl:*), Bash(date:*), Bash(uuidgen:*)"
+      notes: "Some agents' WebFetch has expired certs for api-test.hotelbyte.com. curl via system TLS works."
+
+  - name: hotel-check-availability
+    path: ./skills/hotel-check-availability/SKILL.md
+    invoke: model-invoked
+    user_invocable: true
+    description: |
+      在 hotel-search 之后、hotel-book 之前调用。验证某个 ratePkgId 当前是否
+      可订、价格是否变化、库存是否仍在。hotelbyte 文档要求 "verify before
+      commit"，跳过此步直接下单可能因 ARI 变更被拒。
+    triggers:
+      - "验证可订性"
+      - "check availability"
+      - "verify before book"
+    inputs:
+      type: object
+      required: [ratePkgId]
+      properties:
+        ratePkgId: { type: string, required: true, description: "hotel-search 返回的 ratePkgId" }
+        sessionId: { type: string, required: false, description: "沿用 hotel-search 的 Session-Id，否则新生成" }
+    outputs:
+      type: object
+      properties:
+        available:     { type: boolean, description: "true=可订" }
+        currentPrice:  { type: number,  description: "当前价格（含币种）" }
+        priceChanged:  { type: boolean, description: "相对上次报价是否变化" }
+        error:         { type: object,  description: "结构化错误（含 code/msg）" }
+    side_effects:
+      - "issues POST /api/search/checkAvail (read-only)"
+    dry_run_by_default: true
+    requires_confirm: false
+    depends_on: [hotel-search]
+    tooling:
+      required_commands: [curl, date, uuidgen]
+      claude_code_allowed_tools: "Bash(curl:*), Bash(date:*), Bash(uuidgen:*)"
+
+  - name: hotel-book
+    path: ./skills/hotel-book/SKILL.md
+    invoke: model-invoked
+    user_invocable: true
+    description: |
+      下单预订酒店。默认 Dry-run（输出准备下单清单让用户确认），加 --confirm
+      才真下单并轮询订单状态。在 hotel-check-availability 之后调用。
+    triggers:
+      - "下单"
+      - "预订"
+      - "book hotel"
+      - "make reservation"
+    inputs:
+      type: object
+      required: [ratePkgId, guest]
+      properties:
+        ratePkgId:        { type: string,  required: true,  description: "酒店-check-availability 验证后的 ratePkgId" }
+        sessionId:        { type: string,  required: true,  description: "必须与 hotel-search 时一致" }
+        guest:            { type: object,  required: true,  description: "入住人信息（firstName/lastName/email/phone）" }
+        specialRequests:  { type: string,  required: false, description: "备注" }
+        customerReferenceNo: { type: string, required: false, description: "幂等键，重试用同一值" }
+        confirm:          { type: boolean, required: false, description: "true 才真下单；缺省/false 走 Dry-run" }
+    outputs:
+      type: object
+      properties:
+        supplierReferenceNo: { type: string, description: "酒店侧订单号（用于 queryOrders/cancel）" }
+        status:              { type: string, description: "OrderStatus 枚举（0=Unknown, 1=Confirming, 2=Confirmed, 3=Cancelled, 4=Failed, 5=CancelFailed）" }
+        dry_run:             { type: boolean, description: "true=本次只生成了清单，未真下单" }
+    side_effects:
+      - "issues POST /api/trade/book (MUTATES STATE when --confirm)"
+      - "polls GET /api/trade/queryOrders every 10s, max 18 times (3 minutes)"
+    dry_run_by_default: true
+    requires_confirm: true
+    confirm_flag: --confirm
+    depends_on: [hotel-search, hotel-check-availability]
+    safety:
+      - "Default mode prints the order request as a checklist; does NOT call book endpoint."
+      - "--confirm must be explicitly passed by user or human-equivalent invocation. Agent MUST NOT auto-set confirm=true even if user says 'proceed' without the flag."
+      - "Polling is bounded (max 18 retries × 10s = 3 minutes). After exhaustion, return last-known status with a 'polling_timeout' gap."
+    tooling:
+      required_commands: [curl, date, uuidgen, sleep]
+      claude_code_allowed_tools: "Bash(curl:*), Bash(date:*), Bash(uuidgen:*), Bash(sleep:*)"
+
+  - name: hotel-cancel
+    path: ./skills/hotel-cancel/SKILL.md
+    invoke: model-invoked
+    user_invocable: true
+    description: |
+      取消已预订订单。默认 Dry-run（输出准备取消清单），加 --confirm 才真取消
+      并轮询订单状态。在 hotel-book 之后调用。
+    triggers:
+      - "取消订单"
+      - "取消预订"
+      - "cancel booking"
+      - "cancel order"
+    inputs:
+      type: object
+      required_one_of: [supplierReferenceNo, customerReferenceNo]
+      properties:
+        supplierReferenceNo: { type: string, required: false, description: "酒店侧订单号" }
+        customerReferenceNo: { type: string, required: false, description: "幂等键" }
+        reason:              { type: string, required: false, description: "取消原因（演示环境不强制）" }
+        confirm:             { type: boolean,required: false, description: "true 才真取消" }
+    outputs:
+      type: object
+      properties:
+        status: { type: string, description: "OrderStatus 枚举" }
+        dry_run: { type: boolean, description: "true=本次只生成了清单" }
+    side_effects:
+      - "issues GET /api/trade/queryOrders (read-only, default)"
+      - "issues POST /api/trade/cancel (MUTATES STATE when --confirm)"
+      - "polls GET /api/trade/queryOrders until status == 3 (Cancelled) or timeout"
+    dry_run_by_default: true
+    requires_confirm: true
+    confirm_flag: --confirm
+    depends_on: [hotel-book]
+    safety:
+      - "Default mode queries the order first and prints what would be cancelled."
+      - "--confirm required for actual cancel; same rule as hotel-book."
+      - "Polling bounded identically (max 18 × 10s)."
+    tooling:
+      required_commands: [curl, date, uuidgen, sleep]
+      claude_code_allowed_tools: "Bash(curl:*), Bash(date:*), Bash(uuidgen:*), Bash(sleep:*)"
+
+# Honest-contract binding (hotelbyte `agent-dev-contract` v2.0)
+honest_contract:
+  contract_source: "hotelbyte .shared/skills/agent-dev-contract (21 modes)"
+  applies_to:
+    - pattern_1_prompt_chaining:    "skills chain in fixed order: search → check → book → cancel"
+    - pattern_5_tool_use:            "each skill declares typed request/response in MANIFEST; no free-text tool output"
+    - pattern_10_mcp:                "frontmatter is MCP-agnostic; manifest is the discoverability layer"
+    - pattern_13_human_in_the_loop:  "book/cancel require explicit --confirm; no auto-confirm even on user 'proceed'"
+  red_lines:
+    - "no mock/fabricated-data-as-live: never return synthetic hotel lists"
+    - "no fallback-data-injection: 4xx/5xx returns structured gap, not empty success"
+    - "no demo-credentials-in-persistent-files: ticket is held in memory only"
+    - "no strings.Contains-as-intelligence: routing is by manifest match + LLM, never keyword substring"
+
+# Discovery adapters (per-agent) — illustrative only, not enforced by this manifest
+discovery:
+  claude_code:
+    mechanism: "drop this repo's skills/ into .claude/skills/ (allowlist symlink per skill)"
+    notes: "Do NOT use .claude/commands/ — that is Claude-Code-private, not agent-agnostic."
+  cursor:
+    mechanism: "drop into .cursor/skills/ (allowlist symlink per skill)"
+  codex:
+    mechanism: "drop into .codex/skills/ (whole-tree symlink to this repo's skills/)"
+  github_copilot:
+    mechanism: "drop into .github/skills/ (allowlist symlink per skill)"
+  cline:
+    mechanism: "load MANIFEST.yaml directly via cline.read_file; map required_commands to Cline allowed tools"
