@@ -67,9 +67,10 @@ skills:
     dry_run_by_default: true   # read-only skill; default is also the only mode
     requires_confirm: false
     tooling:
-      required_commands: [curl, date, uuidgen]
-      claude_code_allowed_tools: "Bash(curl:*), Bash(date:*), Bash(uuidgen:*)"
-      notes: "Some agents' WebFetch has expired certs for api-test.hotelbyte.com. curl via system TLS works."
+      required_commands: [hbcli, date]
+      claude_code_allowed_tools: "Bash(hbcli:*), Bash(date:*)"
+      notes: "hbcli (hotelbyte-cli) is the official CLI; handles ticket acquisition + JSON output. date is for fuzzy-date math (e.g. 'next Friday')."
+      install: "curl -fsSL https://github.com/hotelbyte-com/docs/releases/latest/download/install.sh | bash && hbcli auth set-credentials --app-key hotelbyte_api_demo --app-secret hotelbyte_api_demo"
 
   - name: hotel-check-availability
     path: ./skills/hotel-check-availability/SKILL.md
@@ -102,8 +103,9 @@ skills:
     requires_confirm: false
     depends_on: [hotel-search]
     tooling:
-      required_commands: [curl, date, uuidgen]
-      claude_code_allowed_tools: "Bash(curl:*), Bash(date:*), Bash(uuidgen:*)"
+      required_commands: [hbcli, date]
+      claude_code_allowed_tools: "Bash(hbcli:*), Bash(date:*)"
+      install: "curl -fsSL https://github.com/hotelbyte-com/docs/releases/latest/download/install.sh | bash && hbcli auth set-credentials --app-key hotelbyte_api_demo --app-secret hotelbyte_api_demo"
 
   - name: hotel-book
     path: ./skills/hotel-book/SKILL.md
@@ -145,8 +147,9 @@ skills:
       - "--confirm must be explicitly passed by user or human-equivalent invocation. Agent MUST NOT auto-set confirm=true even if user says 'proceed' without the flag."
       - "Polling is bounded (max 18 retries × 10s = 3 minutes). After exhaustion, return last-known status with a 'polling_timeout' gap."
     tooling:
-      required_commands: [curl, date, uuidgen, sleep]
-      claude_code_allowed_tools: "Bash(curl:*), Bash(date:*), Bash(uuidgen:*), Bash(sleep:*)"
+      required_commands: [hbcli, sleep]
+      claude_code_allowed_tools: "Bash(hbcli:*), Bash(sleep:*)"
+      install: "curl -fsSL https://github.com/hotelbyte-com/docs/releases/latest/download/install.sh | bash && hbcli auth set-credentials --app-key hotelbyte_api_demo --app-secret hotelbyte_api_demo"
 
   - name: hotel-cancel
     path: ./skills/hotel-cancel/SKILL.md
@@ -186,8 +189,9 @@ skills:
       - "--confirm required for actual cancel; same rule as hotel-book."
       - "Polling bounded identically (max 18 × 10s)."
     tooling:
-      required_commands: [curl, date, uuidgen, sleep]
-      claude_code_allowed_tools: "Bash(curl:*), Bash(date:*), Bash(uuidgen:*), Bash(sleep:*)"
+      required_commands: [hbcli, sleep]
+      claude_code_allowed_tools: "Bash(hbcli:*), Bash(sleep:*)"
+      install: "curl -fsSL https://github.com/hotelbyte-com/docs/releases/latest/download/install.sh | bash && hbcli auth set-credentials --app-key hotelbyte_api_demo --app-secret hotelbyte_api_demo"
 
 # Honest-contract binding (hotelbyte `agent-dev-contract` v2.0)
 honest_contract:
