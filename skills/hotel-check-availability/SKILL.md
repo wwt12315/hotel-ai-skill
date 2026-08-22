@@ -1,26 +1,24 @@
 ---
 name: hotel-check-availability
-description: "在 hotel-search 之后、hotel-book 之前调用。验证某个 ratePkgId 当前是否可订、价格是否变化、库存是否仍在。hotelbyte 文档明确要求『verify before commit』，跳过此步直接下单可能因 ARI 变更被拒。触发词包括『验证可订性』『check availability』『verify before book』。演示环境为 api-test.hotelbyte.com，凭据为公开 demo 凭据。"
+description: "在 hotel-search 之后、hotel-book 之前调用。通过 hbcli 验证某个 ratePkgId 当前是否可订、价格是否变化、库存是否仍在。hotelbyte 文档明确要求『verify before commit』，跳过此步直接下单可能因 ARI 变更被拒。触发词包括『验证可订性』『check availability』『verify before book』。演示环境为 api-test.hotelbyte.com。"
 ---
 
 # /hotel-check-availability
 
 在 `/hotel-search` 拿到 `ratePkgId` 之后、下单之前跑一次。hotelbyte 文档明确要求"verify before commit"——价格和库存可能在你查询后的几秒内变动，跳过此步直接下单可能被拒。
 
-## API 配置
+## 前提条件
 
-- 端点：`/api/search/checkAvail`
-- Base URL：`https://api-test.hotelbyte.com`
-- AppKey：`hotelbyte_api_demo`
-- AppSecret：`hotelbyte_api_demo`
-- 业务 Header 集合：
-  - `Authorization: Bearer <ticket>`（ticket 从 `/api/auth/ticket` 拿，**含 `ST:` 前缀原样使用**）
-  - `Session-Id: <uuid4>`（**预订流程必填**——本端点也强制要求）
-  - `Language: <IETF BCP 47>`（默认 `en-US`）
-  - `Currency: <ISO 4217>`（默认 `USD`）
-  - `Content-Type: application/json`
+> 本 skill 假设 `hbcli` 已经安装并配好凭据。如未安装，请先执行：
 
-> **工具权限建议（agent-aware）**：本 skill 仅需要 `curl`（调 hotelbyte API）+ `date`（生成 ISO8601 时间戳）+ `uuidgen`（生成 Session-Id）。在 Claude Code 环境下，对应 `allowed-tools: Bash(curl:*), Bash(date:*), Bash(uuidgen:*)`；在其它 agent 工具下，请等价授予这三类外部命令的最小权限。
+```bash
+curl -fsSL https://github.com/hotelbyte-com/docs/releases/latest/download/install.sh | bash
+hbcli auth set-credentials \
+  --app-key hotelbyte_api_demo \
+  --app-secret hotelbyte_api_demo
+```
+
+`hbcli` 自带 ticket 管理，agent 不需要手动换 token / 维护 Session-Id。
 
 ## 用户输入
 
@@ -30,7 +28,6 @@ $ARGUMENTS
 
 支持的形态：
 - `/hotel-check-availability <ratePkgId>` —— 基础用法
-- `/hotel-check-availability <ratePkgId> ja-JP USD` —— 指定语言 + 币种
 - `/hotel-check-availability --test` —— 用固定 fixture 回归
 
 ## 字段说明
@@ -38,8 +35,6 @@ $ARGUMENTS
 | 字段 | 必填 | 默认 | 说明 |
 |---|---|---|---|
 | `ratePkgId` | 是 | — | 必须从 `/hotel-search` 响应里 `data.list[].rooms[].rates[].ratePkgId` 拿 |
-| `language` | 否 | `en-US`（中文输入 → `zh-CN`） | IETF BCP 47 |
-| `currency` | 否 | `USD` | ISO 4217 |
 
 **`ratePkgId` 缺失或模糊**：反问一次。它是长字符串（实测格式如 `10000000<HB>-1<HB>SIM|2|CERT_FAM|RO|RF|1787241886|20260919|20260921`），从 `/hotel-search` 输出的"报价 ID"列复制。
 
@@ -56,59 +51,43 @@ $ARGUMENTS
 
 ## 流程
 
-### 步骤 1：换 ticket（跟 `/hotel-search` 完全一致）
+### 步骤 1：调用 `hbcli search check-avail`
 
 ```bash
-curl -sS -k -X POST -H "Content-Type: application/json" \
-  -d '{"appKey":"hotelbyte_api_demo","appSecret":"hotelbyte_api_demo","ttl":3600}' \
-  https://api-test.hotelbyte.com/api/auth/ticket
+hbcli --json search check-avail --rate-pkg-id "<ratePkgId>"
 ```
 
-成功响应：
-```json
-{"code":0,"msg":"","data":{"ticket":"ST:0Va7n..."}}
-```
+### 步骤 2：解读响应（5 个分支）
 
-取 `data.ticket` 完整字符串（含 `ST:` 前缀）。
-
-### 步骤 2：检查可用
-
-```bash
-curl -sS -k -X POST \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer ST:0Va7n..." \
-  -H "Session-Id: <session-id>" \
-  -H "Language: en-US" \
-  -H "Currency: USD" \
-  -d '{"ratePkgId":"10000000<HB>-1<HB>SIM|2|CERT_FAM|RO|RF|1787241886|20260919|20260921"}' \
-  https://api-test.hotelbyte.com/api/search/checkAvail
-```
-
-### 步骤 3：解读响应（5 个分支）
+`hbcli --json` 把 HTTP 响应包成 `{ok, status, body}` 三段。
 
 #### 分支 A：可订（`status: 1`）—— 真实生产环境的最佳情况
 
-**演示环境无法验证**。预期响应结构（从 Apifox 文档）：
+**演示环境无法验证**。预期响应结构：
 
 ```json
 {
-  "code": 0,
-  "msg": "",
-  "data": {
-    "status": 1,
-    "roomRatePkg": {
-      "ratePkgId": "...",
-      "refundableMode": "full",
-      "refundableUntil": "2026-08-25T23:59:59Z",
-      "rate": {"netRate": {...}, "commissionableRate": {...}, "grossRate": {...}},
-      "totalRate": {"netRate": {...}, "commissionableRate": {...}, "grossRate": {...}},
-      "checkIn": "2026-08-28",
-      "checkOut": "2026-08-30",
-      "board": {"boardId": "BB", "boardName": "Bed & Breakfast"},
-      "tax": {"total": {...}},
-      "cancelFees": [{"until": "...", "fee": {...}}]
-    },
-    "exchangeRateSnapshot": {"date": "...", "usd": {...}}
+  "ok": true,
+  "status": 200,
+  "body": {
+    "code": 0,
+    "msg": "",
+    "data": {
+      "status": 1,
+      "roomRatePkg": {
+        "ratePkgId": "...",
+        "refundableMode": "full",
+        "refundableUntil": "2026-08-25T23:59:59Z",
+        "rate": {"netRate": {...}, "commissionableRate": {...}, "grossRate": {...}},
+        "totalRate": {"netRate": {...}, "commissionableRate": {...}, "grossRate": {...}},
+        "checkIn": "2026-08-28",
+        "checkOut": "2026-08-30",
+        "board": {"boardId": "BB", "boardName": "Bed & Breakfast"},
+        "tax": {"total": {...}},
+        "cancelFees": [{"until": "...", "fee": {...}}]
+      },
+      "exchangeRateSnapshot": {"date": "...", "usd": {...}}
+    }
   }
 }
 ```
@@ -128,20 +107,19 @@ curl -sS -k -X POST \
 - 截止：<refundableUntil>
 - 阶梯：<cancelFees 列表>
 
-**餐食**：<board.boardId>（<boardName>）
+**餐食**：<board.boardId>（<board.boardName>）
 
 **下一步**：✅ 确认无误，请用 `/hotel-book <ratePkgId> <FirstName> <LastName> <email> [--confirm]`
 
 > 提示：snapshot 价格只在当前会话有效。如果你隔了 1 分钟才下单，**请重新跑一次** `/hotel-check-availability`。
-> session=<sessionId>
 ```
 
 #### 分支 B：不可订（`status: 2`）—— 真实生产环境的常见情况
 
-**演示环境无法验证**。预期响应结构：
+**演示环境无法验证**。预期响应：
 
 ```json
-{"code": 0, "msg": "", "data": {"status": 2}}
+{"ok": true, "status": 200, "body": {"code": 0, "msg": "", "data": {"status": 2}}}
 ```
 
 输出：
@@ -166,7 +144,7 @@ curl -sS -k -X POST \
 **演示环境无法验证**。预期响应：
 
 ```json
-{"code": 100001111, "msg": "ARI changed"}
+{"ok": false, "status": 409, "error": "{\"code\": 100001111, \"msg\": \"ARI changed\"}"}
 ```
 
 输出：
@@ -188,13 +166,9 @@ API 返回 `code: 100001111`, `msg: "ARI changed"`。
 #### 分支 D：参数错误（`code: 100000400`）—— 演示环境实测过
 
 **实测响应**：
-```json
-{"code": 100000400, "msg": "param error"}
-```
 
-或：
 ```json
-{"code": 100000400, "msg": "ratePkgId validation failed: invalid ratePkgId format"}
+{"ok": false, "status": 400, "error": "{\"code\": 100000400, \"msg\": \"ratePkgId validation failed: invalid ratePkgId format\"}"}
 ```
 
 输出：
@@ -216,11 +190,9 @@ API 返回 `code: 100000400`, `msg: "param error"` 或 `msg: "ratePkgId validati
 #### 分支 E：Session-Id 不存在（`code: 100000404`）—— 演示环境**实测过**
 
 **实测响应**：
+
 ```json
-{
-  "code": 100000404,
-  "msg": "session not found for userSessionId <session-id> (internal: s:1:<session-id>)"
-}
+{"ok": false, "status": 404, "error": "{\"code\": 100000404, \"msg\": \"session not found for userSessionId ... (internal: s:1:...)\"}"}
 ```
 
 输出：
@@ -243,7 +215,7 @@ API 返回 `code: 100000404`, `msg: "session not found..."`。
 
 **生产环境**：
 - 要先跑 `/hotel-search` 拿到 `status: success` 的真实酒店 → 内部 session 被创建
-- 再用此时拿到的 ratePkgId 和 Session-Id 调 `/hotel-check-availability`
+- 再用此时拿到的 ratePkgId 调 `/hotel-check-availability`
 
 **建议**：
 - 演示环境用 `/hotel-check-availability --test` 跑 fixture 验证 toolchain
@@ -255,7 +227,8 @@ API 返回 `code: 100000404`, `msg: "session not found..."`。
 ```markdown
 # API 请求失败
 
-HTTP 状态码：<code>
+`hbcli` 返回 `ok: false` + `error`。
+HTTP 状态码：<status>
 响应：<前 500 字>
 
 **建议**：
@@ -278,20 +251,20 @@ HTTP 状态码：<code>
 
 **关键约束**：
 - 从 `/hotel-check-availability` 拿到 snapshot 到 `/hotel-book` 调用，**应 < 60 秒**。超过 1 分钟重新 verify。
-- `/hotel-check-availability` 跟 `/hotel-book` 必须**使用同一个 Session-Id**，否则 hotelbyte 会判为不同会话拒绝。
+- `/hotel-check-availability` 跟 `/hotel-book` 由 `hbcli` 内部共用同一 session，agent 无需手动维护 Session-Id。
 
 ## 兜底分支汇总
 
 | 现象 | 处理 |
 |------|------|
-| `data.status == 1` | 走 A 分支（可订）—— 真实生产环境 |
-| `data.status == 2` | 走 B 分支（不可订）—— 真实生产环境 |
-| `code == 100001111` | 走 C 分支（ARI 变更）—— 真实生产环境 |
-| `code == 100000400` | 走 D 分支（参数错）—— **演示环境实测** |
-| `code == 100000404` + msg 含 "session not found" | 走 E 分支（演示环境**必然**） |
-| 其他 `code != 0` | 走 F 分支（API 异常） |
-| `curl` 退出码非 0 | 重跑一次 + 报告 stderr |
-| `data.ticket` 缺失 | 检查 `msg`，可能是 appKey 失效 |
+| `body.data.status == 1` | 走 A 分支（可订）—— 真实生产环境 |
+| `body.data.status == 2` | 走 B 分支（不可订）—— 真实生产环境 |
+| `body.code == 100001111` | 走 C 分支（ARI 变更）—— 真实生产环境 |
+| `body.code == 100000400` | 走 D 分支（参数错）—— **演示环境实测** |
+| `body.code == 100000404` + msg 含 "session not found" | 走 E 分支（演示环境**必然**） |
+| 其他 `body.code != 0` | 走 F 分支（API 异常） |
+| `hbcli ok == false` | 走 F 分支（HTTP 4xx/5xx） |
+| `hbcli` 退出码非 0 | 重跑一次 + 报告 stderr |
 | `ratePkgId` 含空格 / 看起来不对 | 反问："ratePkgId 应是从 /hotel-search 复制的长字符串" |
 
 ## `--test` 模式
@@ -300,8 +273,6 @@ HTTP 状态码：<code>
 
 ```
 ratePkgId=10000000<HB>-1<HB>SIM|2|CERT_FAM|RO|RF|1787241886|20260919|20260921（演示环境真实订单的 ratePkgId）
-language=en-US
-currency=USD
 ```
 
 **演示环境下**：预期返回分支 E（session not found）或分支 D（参数错）。**这是正常的**——证明 toolchain 通了。
@@ -315,6 +286,5 @@ currency=USD
 - 不要跳过本 skill 直接 `/hotel-book`——hotelbyte 文档明确要求 verify-before-commit
 - 不要把 snapshot 价格当成"永恒价格"——> 60 秒就要重新 verify
 - 不要把演示凭据 `hotelbyte_api_demo` 写进任何文件 / 文档 / commit
-- 不要用 `Bash(*)` 宽权限——本命令只能调 `curl` / `date` / `uuidgen`
-- 不要把 ticket 持久化到 `.claude/memory.db`
+- 不要用 `Bash(*)` 宽权限——本命令只能调 `hbcli`
 - 不要瞎编 `ratePkgId` —— 真实 ID 只能从 `/hotel-search` 响应拿
