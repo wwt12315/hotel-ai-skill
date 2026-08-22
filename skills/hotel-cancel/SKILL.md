@@ -1,26 +1,24 @@
 ---
 name: hotel-cancel
-description: "取消已预订订单。默认 Dry-run（输出准备取消清单），加 --confirm 才真取消并轮询订单状态。在 hotel-book 之后调用。触发词包括『取消订单』『取消预订』『cancel booking』『cancel order』。演示环境为 api-test.hotelbyte.com，凭据为公开 demo 凭据。"
+description: "通过 hbcli 取消已预订订单。默认 Dry-run（输出准备取消清单），加 --confirm 才真取消并轮询订单状态。在 hotel-book 之后调用。触发词包括『取消订单』『取消预订』『cancel booking』『cancel order』。演示环境为 api-test.hotelbyte.com。"
 ---
 
 # /hotel-cancel
 
-取消已预订的酒店订单。**默认 Dry-run 模式**——先调 `/api/trade/queryOrders` 查订单状态，输出"准备取消"清单让你确认；加 `--confirm` 才真取消、调 `/api/trade/cancel`、并轮询验证状态变更。
+通过 `hbcli` 取消已预订的酒店订单。**默认 Dry-run 模式**——先调 `/api/trade/queryOrders` 查订单状态，输出"准备取消"清单让你确认；加 `--confirm` 才真取消、调 `/api/trade/cancel`、并轮询验证状态变更。
 
-## API 配置
+## 前提条件
 
-- 端点：`/api/trade/cancel`（取消）+ `/api/trade/queryOrders`（查订单）
-- Base URL：`https://api-test.hotelbyte.com`
-- AppKey：`hotelbyte_api_demo`
-- AppSecret：`hotelbyte_api_demo`
-- 业务 Header 集合：
-  - `Authorization: Bearer <ticket>`（ticket 从 `/api/auth/ticket` 拿，**含 `ST:` 前缀原样使用**）
-  - `Session-Id: <uuid4>`（**预订流程必填**——必须跟 `/hotel-book` 用同一个 Session-Id，便于酒店侧关联此次取消与原订单）
-  - `Language: <IETF BCP 47>`（默认 `en-US`）
-  - `Currency: <ISO 4217>`（默认 `USD`）
-  - `Content-Type: application/json`
+> 本 skill 假设 `hbcli` 已经安装并配好凭据。如未安装：
 
-> **工具权限建议（agent-aware）**：本 skill 仅需要 `curl`（调 hotelbyte API）+ `date`（生成 ISO8601 时间戳）+ `uuidgen`（生成 idempotency key）+ `sleep`（订单状态轮询）。在 Claude Code 环境下，对应 `allowed-tools: Bash(curl:*), Bash(date:*), Bash(uuidgen:*), Bash(sleep:*)`；在其它 agent 工具下，请等价授予这四类外部命令的最小权限。
+```bash
+curl -fsSL https://github.com/hotelbyte-com/docs/releases/latest/download/install.sh | bash
+hbcli auth set-credentials \
+  --app-key hotelbyte_api_demo \
+  --app-secret hotelbyte_api_demo
+```
+
+`hbcli` 自带 ticket 管理 + Session-Id 管理。
 
 > **安全约束**：本命令涉及**真实取消订单操作**。默认 Dry-run，加 `--confirm` 才执行。**取消订单通常不可逆**（尤其是 status: 2 已确认的状态），演示环境请慎重使用 `--confirm`。
 
@@ -85,21 +83,19 @@ $ARGUMENTS
 
 ### 2026-08-21 重测补充：queryOrders 过滤字段实测
 
-实测 queryOrders 的 4 种 filter body 形态：
+实测 queryOrders 的 4 种 filter body 形态（`hbcli` 已自动包成 `--customer-reference-nos` / `--supplier-reference-nos` 复数 + 数组形式）：
 
-| 请求体 | 演示环境响应（HTTP 200, code:0） | 解读 |
+| CLI 参数 | 演示环境响应（HTTP 200, code:0） | 解读 |
 |---|---|---|
-| `{}` | `orders[]` 含全部 100 条 demo 订单（251 KB） | 不过滤 |
-| `{"customerReferenceNos":["E2E_TEST_..."]}` | `orders[]` 含 1 条匹配订单（2.5 KB） | **过滤生效** ✓ |
-| `{"customerReferenceNos":["FAKE-..."]}` | `orders[]` 空数组（40 B） | 过滤生效，无匹配 |
-| `{"supplierReferenceNos":["71705286443857226"]}` | `orders[]` 含 1 条匹配订单（2.5 KB） | **过滤生效** ✓ |
-| `{"supplierReferenceNo":"71705286443857226"}` | `orders[]` 含全部 100 条（251 KB） | **过滤被忽略**（单数字段名 hotelbyte 不识别） |
+| `{}`（不传过滤） | `orders[]` 含全部 100 条 demo 订单（251 KB） | 不过滤 |
+| `--customer-reference-nos "E2E_TEST_..."` | `orders[]` 含 1 条匹配订单（2.5 KB） | **过滤生效** ✓ |
+| `--customer-reference-nos "FAKE-..."` | `orders[]` 空数组（40 B） | 过滤生效，无匹配 |
+| `--supplier-reference-nos "71705286443857226"` | `orders[]` 含 1 条匹配订单（2.5 KB） | **过滤生效** ✓ |
 
 **结论**：
-- `customerReferenceNos` 和 `supplierReferenceNos`（**复数 + 数组**）都生效
-- `customerReferenceNo` / `supplierReferenceNo`（**单数**）被忽略，会返回全部订单
-- 本 SKILL.md 步骤 3 用的是 `customerReferenceNos`（数组），符合 hotelbyte 规范
-- 想用 `supplierReferenceNo` 时务必改为 `supplierReferenceNos`（复数）
+- `hbcli trade query-orders` 的 `--customer-reference-nos` 和 `--supplier-reference-nos`（**复数 + 数组**）都生效
+- 本 SKILL.md 步骤 3 用的是 `--customer-reference-nos`（复数），符合 hotelbyte 规范
+- 想用 supplier 维度过滤时务必用 `--supplier-reference-nos`（复数）
 
 ## 流程
 
@@ -114,17 +110,7 @@ $ARGUMENTS
 如果 `customerReferenceNo` 缺失：反问。
 如果 `supplierReferenceNo` 缺失：反问。
 
-### 步骤 2：换 ticket（同其他 skill）
-
-```bash
-curl -sS -k -X POST -H "Content-Type: application/json" \
-  -d '{"appKey":"hotelbyte_api_demo","appSecret":"hotelbyte_api_demo","ttl":3600}' \
-  https://api-test.hotelbyte.com/api/auth/ticket
-```
-
-取 `data.ticket` 完整字符串。
-
-### 步骤 3：先 queryOrders 查订单状态（无论 Dry-run 还是 confirm）
+### 步骤 2：先 queryOrders 查订单状态（无论 Dry-run 还是 confirm）
 
 ⚠️ **关键**：在调 `/api/trade/cancel` 之前**先查订单状态**，避免：
 - 取消已取消的订单（status: 3）
@@ -132,13 +118,8 @@ curl -sS -k -X POST -H "Content-Type: application/json" \
 - 取消未知状态的订单（status: 0）
 
 ```bash
-curl -sS -k -X POST \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer ST:..." \
-  -H "Session-Id: <session-id>" \
-  -H "Language: en-US" \
-  -d '{"customerReferenceNos":["<customerReferenceNo>"]}' \
-  https://api-test.hotelbyte.com/api/trade/queryOrders
+hbcli --json trade query-orders \
+  --customer-reference-nos "<customerReferenceNo>"
 ```
 
 **解读状态**（实测分支）：
@@ -153,11 +134,11 @@ curl -sS -k -X POST \
 | 5 (CancelFailed) | 重试取消——把它当正常订单再 cancel 一次 |
 
 **实测响应**：
-- 订单存在：`{"code": 0, "msg": "", "data": {"orders": [<订单>...]} }`
-- 订单不存在：`{"code": 0, "msg": "", "data": {"orders": []}}`
+- 订单存在：`{"ok": true, "status": 200, "body": {"code": 0, "msg": "", "data": {"orders": [<订单>...]}}}`
+- 订单不存在：`{"ok": true, "status": 200, "body": {"code": 0, "msg": "", "data": {"orders": []}}}`
 - 空请求 `{}` 会返回演示环境所有订单
 
-### 步骤 4：Dry-run（默认）—— 输出"准备取消"清单
+### 步骤 3：Dry-run（默认）—— 输出"准备取消"清单
 
 ```markdown
 # 🗑️ 准备取消（Dry-run，未执行）
@@ -197,7 +178,7 @@ curl -sS -k -X POST \
 
 **Dry-run 模式到此结束**——**不调 `/api/trade/cancel`**，不消耗对方 API 配额。
 
-### 步骤 5：真取消（仅 `--confirm` 模式）
+### 步骤 4：真取消（仅 `--confirm` 模式）
 
 构造请求体（文档 §CancelReq）：
 
@@ -209,23 +190,18 @@ curl -sS -k -X POST \
 }
 ```
 
-发请求：
+调 `hbcli`：
 
 ```bash
-curl -sS -k -X POST \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer ST:..." \
-  -H "Session-Id: <session-id>" \
-  -H "Language: en-US" \
-  -d '{
-    "customerReferenceNo": "<uuid>",
-    "supplierReferenceNo": "<id>",
-    "reason": "Customer request"
-  }' \
-  https://api-test.hotelbyte.com/api/trade/cancel
+hbcli --json trade cancel \
+  --customer-reference-no "<customerReferenceNo>" \
+  --supplier-reference-no "<supplierReferenceNo>" \
+  --reason "Customer request"
 ```
 
-### 步骤 6：解读 cancel 响应（3 个分支）
+### 步骤 5：解读 cancel 响应（4 个分支）
+
+`hbcli --json` 把 HTTP 响应包成 `{ok, status, body}` 三段。
 
 #### 分支 A：取消成功（`status: 3 = Cancelled`）—— 真实生产环境
 
@@ -233,16 +209,20 @@ curl -sS -k -X POST \
 
 ```json
 {
-  "code": 0,
-  "msg": "",
-  "data": {
-    "serviceFee": {"currency": "USD", "amount": 0.00},
-    "status": 3
+  "ok": true,
+  "status": 200,
+  "body": {
+    "code": 0,
+    "msg": "",
+    "data": {
+      "serviceFee": {"currency": "USD", "amount": 0.00},
+      "status": 3
+    }
   }
 }
 ```
 
-**拿到 `status: 3` 后立即进入轮询**（步骤 7）。
+**拿到 `status: 3` 后立即进入轮询**（步骤 6）。
 
 注意 `serviceFee` 是**供应商收的服务费**（不退还），customer 实际退款 = `totalRate - serviceFee`。
 
@@ -252,11 +232,15 @@ curl -sS -k -X POST \
 
 ```json
 {
-  "code": 0,
-  "msg": "",
-  "data": {
-    "serviceFee": {"currency": "USD", "amount": 30.00},
-    "status": 5
+  "ok": true,
+  "status": 200,
+  "body": {
+    "code": 0,
+    "msg": "",
+    "data": {
+      "serviceFee": {"currency": "USD", "amount": 30.00},
+      "status": 5
+    }
   }
 }
 ```
@@ -286,7 +270,7 @@ curl -sS -k -X POST \
 **实测响应**（随便给一个不存在的 customerReferenceNo）：
 
 ```json
-{"code": 100000404, "msg": "failed to query order"}
+{"ok": false, "status": 404, "error": "{\"code\": 100000404, \"msg\": \"failed to query order\"}"}
 ```
 
 **含义**：cancel 内部先 queryOrders 找订单，找不到就返回 404。
@@ -324,7 +308,7 @@ API 返回 `code: 100000404`, `msg: "failed to query order"`。
 **实测响应**（customerReferenceNo 和 supplierReferenceNo 都缺失）：
 
 ```json
-{"code": 100000400, "msg": "order identifier is required"}
+{"ok": false, "status": 400, "error": "{\"code\": 100000400, \"msg\": \"order identifier is required\"}"}
 ```
 
 **含义**：cancel 强制要求至少一个订单标识。
@@ -345,21 +329,16 @@ API 返回 `code: 100000400`, `msg: "order identifier is required"`。
 
 不进入轮询。
 
-### 步骤 7：轮询订单状态（仅分支 A 或 B 触发）
+### 步骤 6：轮询订单状态（仅分支 A 或 B 触发）
 
 轮询 `/api/trade/queryOrders`，看 `status` 是否变成 3：
 
 ```bash
 CUSTOMER_REF=<customerReferenceNo>
 for i in $(seq 1 18); do
-  RESPONSE=$(curl -sS -k -X POST \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ST:..." \
-    -H "Session-Id: <session-id>" \
-    -H "Language: en-US" \
-    -d "{\"customerReferenceNos\":[\"$CUSTOMER_REF\"]}" \
-    https://api-test.hotelbyte.com/api/trade/queryOrders)
-  STATUS=$(echo "$RESPONSE" | jq -r '.data.orders[0].status // 0')
+  RESPONSE=$(hbcli --json trade query-orders \
+    --customer-reference-nos "$CUSTOMER_REF")
+  STATUS=$(echo "$RESPONSE" | jq -r '.body.data.orders[0].status // 0')
   echo "Attempt $i (every 10s): status=$STATUS"
   if [ "$STATUS" = "3" ]; then
     break
@@ -408,7 +387,7 @@ done
 - 修改订单：hotelbyte 测试 API 不支持 edit，只能"取消后重订"
 ```
 
-### 步骤 8：更新 `.claude/orders/<customerReferenceNo>.json`（仅分支 A 或 B 成功）
+### 步骤 7：更新 `.claude/orders/<customerReferenceNo>.json`（仅分支 A 或 B 成功）
 
 更新本地订单快照：
 
@@ -432,14 +411,14 @@ done
 
 | 现象 | 处理 |
 |------|------|
-| `code: 0` + `status: 3` | 走 A 分支 → 轮询（**真实生产环境**） |
-| `code: 0` + `status: 5` | 走 B 分支（取消失败，**真实生产环境**） |
-| `code: 100000404` + msg "failed to query order" | 走 C 分支（订单不存在，**演示环境实测**） |
-| `code: 100000400` + msg "order identifier is required" | 走 D 分支（参数错，**演示环境实测**） |
-| `data.orders` 空数组 | 走 C 分支（订单不存在） |
-| 其他 `code != 0` | 走 E 分支（API 异常） |
-| `curl` 退出码非 0 | 重跑一次 + 报告 stderr |
-| `data.ticket` 缺失 | 检查 `msg`，可能是 appKey 失效 |
+| `body.code: 0` + `status: 3` | 走 A 分支 → 轮询（**真实生产环境**） |
+| `body.code: 0` + `status: 5` | 走 B 分支（取消失败，**真实生产环境**） |
+| `body.code: 100000404` + msg "failed to query order" | 走 C 分支（订单不存在，**演示环境实测**） |
+| `body.code: 100000400` + msg "order identifier is required" | 走 D 分支（参数错，**演示环境实测**） |
+| `body.data.orders` 空数组 | 走 C 分支（订单不存在） |
+| 其他 `body.code != 0` | 走 E 分支（API 异常） |
+| `hbcli ok == false` | 走 E 分支（HTTP 4xx/5xx） |
+| `hbcli` 退出码非 0 | 重跑一次 + 报告 stderr |
 | 两个 ID 看起来不对 | 反问："两个 ID 都是从 /hotel-book 输出的详情复制" |
 | 轮询 18 次仍未变 3 | 报告"取消进行中"，保留 ID 让用户重试 |
 
@@ -462,8 +441,7 @@ reason="Customer request"
 - **不要默认真取消**——必须 `--confirm` 标志
 - **不要跳过 queryOrders**——一定要先查订单状态确认可取消
 - **不要把演示凭据 `hotelbyte_api_demo` 写进任何文件 / 文档 / commit**
-- **不要用 `Bash(*)` 宽权限**——本命令只能调 `curl` / `date` / `uuidgen` / `sleep`
-- **不要把 ticket 持久化到 `.claude/memory.db`**
+- **不要用 `Bash(*)` 宽权限**——本命令只能调 `hbcli` + `sleep`
 - **不要取消后再取消**——queryOrders 检查 status 3 等终态，跳过重复取消
 
 ## 已知限制
