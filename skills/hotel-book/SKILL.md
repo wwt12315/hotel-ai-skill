@@ -1,30 +1,28 @@
 ---
 name: hotel-book
-description: "下单预订酒店。默认 Dry-run（输出准备下单清单让用户确认），加 --confirm 才真下单并轮询订单状态。在 hotel-check-availability 之后调用。触发词包括『下单』『预订』『book hotel』『make reservation』。演示环境为 api-test.hotelbyte.com，凭据为公开 demo 凭据。"
+description: "通过 hbcli 下单预订酒店。默认 Dry-run（输出准备下单清单让用户确认），加 --confirm 才真下单并轮询订单状态。在 hotel-check-availability 之后调用。触发词包括『下单』『预订』『book hotel』『make reservation』。演示环境为 api-test.hotelbyte.com。"
 ---
 
 # /hotel-book
 
-预订酒店。**默认 Dry-run 模式**——只输出"准备下单"清单让你确认；加 `--confirm` 才真下单、调 `/api/trade/book`、并轮询订单状态。
+通过 `hbcli` 预订酒店。**默认 Dry-run 模式**——只输出"准备下单"清单让你确认；加 `--confirm` 才真下单、调 `/api/trade/book`、并轮询订单状态。
 
 下游衔接：把 `customerReferenceNo` 保留好，取消订单时 `/hotel-cancel` 要用。
 
-## API 配置
+## 前提条件
 
-- 端点：`/api/trade/book`
-- Base URL：`https://api-test.hotelbyte.com`
-- AppKey：`hotelbyte_api_demo`
-- AppSecret：`hotelbyte_api_demo`
-- 业务 Header 集合：
-  - `Authorization: Bearer <ticket>`（ticket 从 `/api/auth/ticket` 拿，**含 `ST:` 前缀原样使用**）
-  - `Session-Id: <uuid4>`（**预订流程必填**——必须跟 `/hotel-check-availability` 用同一个 Session-Id，否则 hotelbyte 判为不同会话会拒）
-  - `Language: <IETF BCP 47>`（默认 `en-US`）
-  - `Currency: <ISO 4217>`（默认 `USD`）
-  - `Content-Type: application/json`
+> 本 skill 假设 `hbcli` 已经安装并配好凭据。如未安装：
 
-> **工具权限建议（agent-aware）**：本 skill 仅需要 `curl`（调 hotelbyte API）+ `date`（生成 ISO8601 时间戳）+ `uuidgen`（生成 idempotency key）+ `sleep`（订单状态轮询）。在 Claude Code 环境下，对应 `allowed-tools: Bash(curl:*), Bash(date:*), Bash(uuidgen:*), Bash(sleep:*)`；在其它 agent 工具下，请等价授予这四类外部命令的最小权限。
+```bash
+curl -fsSL https://github.com/hotelbyte-com/docs/releases/latest/download/install.sh | bash
+hbcli auth set-credentials \
+  --app-key hotelbyte_api_demo \
+  --app-secret hotelbyte_api_demo
+```
 
-> **安全约束**：本命令涉及**真实下单操作**。默认 Dry-run，加 `--confirm` 才执行。**演示环境的 book 调用大概率失败**（ratePkgId 格式校验/session 创建限制），但仍会消耗一次酒店端的 API 配额——演示环境请慎重使用 `--confirm`。
+`hbcli` 自带 ticket 管理 + Session-Id 管理，agent 无需手动换 token / 生成 Session-Id。
+
+> **安全约束**：本命令涉及**真实下单操作**。默认 Dry-run，加 `--confirm` 才执行。**演示环境的 book 调用大概率失败**（ratePkgId 格式校验 / session 创建限制），但仍会消耗一次酒店端的 API 配额——演示环境请慎重使用 `--confirm`。
 
 ## 用户输入
 
@@ -55,13 +53,13 @@ $ARGUMENTS
 | `guests[].firstName` | 是 | — | 入住客人名（每间房至少 1 个） |
 | `guests[].lastName` | 是 | — | 入住客人姓 |
 | `guests[].roomIndex` | 是 | — | 房间索引（**从 1 开始**） |
-| `customerReferenceNo` | 自动生成 | — | UUID4，**幂等键**——重复提交同一 ID 不会重复扣款 |
+| `customerReferenceNo` | 自动生成 | — | UUID4，**幂等键**——重复提交同一 ID 不会重复扣款（由 hbcli 自动生成） |
 | `roomCount` | 否 | 1 | 房间数 |
 | `--confirm` | 否 | false | 加这个标志才真下单 |
 
 **中文姓名处理**（**干跑阶段就要确认**）：
 - "张三" → `firstName: "San", lastName: "Zhang"`（拼音）
-- 用 `Bash(date:*)` 自带的 LLM 拼音能力不强，**反问用户确认拼音写法**——CJK 字符传给酒店可能拒收
+- agent 自身拼音能力不强，**反问用户确认拼音写法**——CJK 字符传给酒店可能拒收
 
 **`ratePkgId` 缺失或模糊**：反问一次。它是长字符串（实测格式如 `10000000<HB>-1<HB>SIM|2|CERT_FAM|RO|RF|1787241886|20260919|20260921`），从 `/hotel-check-availability` 的输出复制。
 
@@ -90,28 +88,7 @@ $ARGUMENTS
 如果 `ratePkgId` 缺失：反问。
 如果姓名含中文字符（不是 ASCII）：**反问一次拼音**。
 
-### 步骤 2：换 ticket（同其他 skill）
-
-```bash
-curl -sS -k -X POST -H "Content-Type: application/json" \
-  -d '{"appKey":"hotelbyte_api_demo","appSecret":"hotelbyte_api_demo","ttl":3600}' \
-  https://api-test.hotelbyte.com/api/auth/ticket
-```
-
-取 `data.ticket` 完整字符串。
-
-### 步骤 3：生成 Session-Id 和 customerReferenceNo
-
-⚠️ **关键**：从 `/hotel-check-availability` 轮询的对方上下文里，**复用对方 Session-Id**（保持会话一致）。如果用户**没有**先跑 `/hotel-check-availability`，**当场生成新的 Session-Id** 并警告：
-
-> ⚠️ 提示：跳过了 `/hotel-check-availability`。建议先跑一次再下单，避免 ARI 变更被拒。
-
-```bash
-SESSION_ID=$(uuidgen)
-CUSTOMER_REF=$(uuidgen)
-```
-
-### 步骤 4：Dry-run（默认）—— 输出"准备下单"清单
+### 步骤 2：Dry-run（默认）—— 输出"准备下单"清单
 
 ```markdown
 # 🛒 准备下单（Dry-run，未执行）
@@ -130,8 +107,8 @@ CUSTOMER_REF=$(uuidgen)
 - ...
 
 **订单 ID（先生成）**：
-- customerReferenceNo:<uuid>（幂等键，重复提交不会扣两次款）
-- Session-Id：<session-id>（必须跟之前 /hotel-check-availability 一致）
+- customerReferenceNo：<uuid>（幂等键，由 hbcli 自动生成）
+- Session-Id：<hbcli 内部管理>
 
 ---
 
@@ -150,7 +127,7 @@ CUSTOMER_REF=$(uuidgen)
 
 **Dry-run 模式到此结束**——**不调 `/api/trade/book`**，不消耗对方 API 配额。
 
-### 步骤 5：真下单（仅 `--confirm` 模式）
+### 步骤 3：真下单（仅 `--confirm` 模式）
 
 构造请求体（文档 §BookReq）：
 
@@ -173,77 +150,60 @@ CUSTOMER_REF=$(uuidgen)
 }
 ```
 
-如果是 2 间房：
-
-```json
-{
-  "customerReferenceNo": "<uuid>",
-  "ratePkgId": "<ratePkgId>",
-  "holder": { ... },
-  "guests": [
-    {"roomIndex": 1, "firstName": "San", "lastName": "Zhang"},
-    {"roomIndex": 2, "firstName": "Si", "lastName": "Li"}
-  ]
-}
-```
-
-发请求：
+调 `hbcli`：
 
 ```bash
-curl -sS -k -X POST \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer ST:..." \
-  -H "Session-Id: <session-id>" \
-  -H "Language: en-US" \
-  -H "Currency: USD" \
-  -d '{
-    "customerReferenceNo": "<uuid>",
-    "ratePkgId": "10000000<HB>-1<HB>SIM|2|CERT_FAM|RO|RF|1787241886|20260919|20260921",
-    "holder": {"firstName":"San","lastName":"Zhang","email":"zhangsan@example.com"},
-    "guests": [{"roomIndex":1,"firstName":"San","lastName":"Zhang"}]
-  }' \
-  https://api-test.hotelbyte.com/api/trade/book
+hbcli --json trade book \
+  --rate-pkg-id "<ratePkgId>" \
+  --holder '{"firstName":"San","lastName":"Zhang","email":"zhangsan@example.com"}' \
+  --guests '[{"roomIndex":1,"firstName":"San","lastName":"Zhang"}]'
 ```
 
-### 步骤 6：解读 book 响应（5 个分支）
+可选：`--customer-reference-no "<uuid>"`（幂等键，不传则 hbcli 自动生成）。
+
+### 步骤 4：解读 book 响应（5 个分支）
 
 #### 分支 A：下单成功（`status: 1 = Confirming` 或 `status: 2 = Confirmed`）—— 真实生产环境
 
-**演示环境无法验证**。预期响应结构（从 Apifox 文档）：
+**演示环境无法验证**。预期响应结构：
 
 ```json
 {
-  "code": 0,
-  "msg": "",
-  "data": {
-    "hotelOrder": {
-      "status": 1,
-      "statusRemark": "正在确认中",
-      "checkIn": "2026-08-28",
-      "checkOut": "2026-08-30",
-      "nightCount": 2,
-      "roomCount": 1,
-      "bookingTime": "2026-08-21T08:00:00Z",
-      "platformReferenceNo": "PLT202608210001234",
-      "customerReferenceNo": "abcdef-1234-5678-...",
-      "supplierReferenceNo": "SUP12345",
-      "netRate": {"currency": "USD", "amount": 555.00},
-      "grossRate": {"currency": "USD", "amount": 600.00},
-      "hotel": {"hotelId": "...", "name": {"en": "...", "zh": "..."}, "address": {...}},
-      "rooms": [{"roomTypeId": "...", "ratePkgId": "...", "checkIn": "...", "checkOut": "...", "rate": {...}, "totalRate": {...}}]
+  "ok": true,
+  "status": 200,
+  "body": {
+    "code": 0,
+    "msg": "",
+    "data": {
+      "hotelOrder": {
+        "status": 1,
+        "statusRemark": "正在确认中",
+        "checkIn": "2026-08-28",
+        "checkOut": "2026-08-30",
+        "nightCount": 2,
+        "roomCount": 1,
+        "bookingTime": "2026-08-21T08:00:00Z",
+        "platformReferenceNo": "PLT202608210001234",
+        "customerReferenceNo": "abcdef-1234-5678-...",
+        "supplierReferenceNo": "SUP12345",
+        "netRate": {"currency": "USD", "amount": 555.00},
+        "grossRate": {"currency": "USD", "amount": 600.00},
+        "hotel": {"hotelId": "...", "name": {"en": "...", "zh": "..."}, "address": {...}},
+        "rooms": [{"roomTypeId": "...", "ratePkgId": "...", "checkIn": "...", "checkOut": "...", "rate": {...}, "totalRate": {...}}]
+      }
     }
   }
 }
 ```
 
-**拿到 `status: 1` 后立即进入轮询**（步骤 7）。
+**拿到 `status: 1` 后立即进入轮询**（步骤 5）。
 
 #### 分支 B：ARI 变更（`code: 100001111`）—— 真实生产环境
 
 **演示环境无法验证**。预期响应：
 
 ```json
-{"code": 100001111, "msg": "ARI changed"}
+{"ok": false, "status": 409, "error": "{\"code\": 100001111, \"msg\": \"ARI changed\"}"}
 ```
 
 输出：
@@ -266,13 +226,15 @@ API 返回 `code: 100001111`。
 #### 分支 C：参数错误（`code: 100000400`）—— 演示环境实测过
 
 **实测响应**：
+
 ```json
-{"code": 100000400, "msg": "ratePkgId validation failed at RP461850557-1234567890: invalid ratePkgId format: RP461850557-1234567890"}
+{"ok": false, "status": 400, "error": "{\"code\": 100000400, \"msg\": \"ratePkgId validation failed at RP461850557-1234567890: invalid ratePkgId format\"}"}
 ```
 
 或：
+
 ```json
-{"code": 100000400, "msg": "param error"}
+{"ok": false, "status": 400, "error": "{\"code\": 100000400, \"msg\": \"param error\"}"}
 ```
 
 输出：
@@ -298,7 +260,22 @@ API 返回 `code: 100000400`, `msg: "ratePkgId validation failed at <ratePkgId>:
 **演示环境无法验证**。预期响应：
 
 ```json
-{"code": 0, "msg": "", "data": {"hotelOrder": {"status": 4, "statusRemark": "供应商拒绝预订", "platformReferenceNo": "PLT...", "customerReferenceNo": "..."}}}
+{
+  "ok": true,
+  "status": 200,
+  "body": {
+    "code": 0,
+    "msg": "",
+    "data": {
+      "hotelOrder": {
+        "status": 4,
+        "statusRemark": "供应商拒绝预订",
+        "platformReferenceNo": "PLT...",
+        "customerReferenceNo": "..."
+      }
+    }
+  }
+}
 ```
 
 输出：
@@ -327,7 +304,9 @@ API 返回 `code: 100000400`, `msg: "ratePkgId validation failed at <ratePkgId>:
 ```markdown
 # API 请求失败
 
-API 返回 `code: <code>`, `msg: "<msg>"`。
+`hbcli` 返回 `ok: false` + `error`。
+HTTP 状态码：<status>
+响应：<前 500 字>
 
 **演示环境下常见**：
 - 401 Unauthorized：ticket 过期
@@ -335,29 +314,23 @@ API 返回 `code: <code>`, `msg: "<msg>"`。
 - 500 Server Error：上游服务故障
 
 **建议**：
-- 401 → 重新换 ticket，再重试
+- 401 → 重跑（hbcli 会自动续 ticket）
 - 404 → 重新跑 `/hotel-search` 创建 session
 - 500 → 等 30 秒重试
 ```
 
 不进入轮询。
 
-### 步骤 7：轮询订单状态（仅分支 A 触发）
+### 步骤 5：轮询订单状态（仅分支 A 触发）
 
 当 book 响应 `status: 1`（Confirming）时，**立即进入轮询**：
 
 ```bash
-# 轮询 18 次，每次 10 秒
 CUSTOMER_REF=<customerReferenceNo>
 for i in $(seq 1 18); do
-  RESPONSE=$(curl -sS -k -X POST \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ST:..." \
-    -H "Session-Id: <session-id>" \
-    -H "Language: en-US" \
-    -d "{\"customerReferenceNos\":[\"$CUSTOMER_REF\"]}" \
-    https://api-test.hotelbyte.com/api/trade/queryOrders)
-  STATUS=$(echo "$RESPONSE" | jq -r '.data.orders[0].status // 0')
+  RESPONSE=$(hbcli --json trade query-orders \
+    --customer-reference-nos "$CUSTOMER_REF")
+  STATUS=$(echo "$RESPONSE" | jq -r '.body.data.orders[0].status // 0')
   echo "Attempt $i (every 10s): status=$STATUS"
   if [ "$STATUS" = "2" ] || [ "$STATUS" = "3" ] || [ "$STATUS" = "4" ]; then
     break
@@ -403,7 +376,7 @@ done
 - 取消订单：`/hotel-cancel <customerReferenceNo> <supplierReferenceNo> [reason]`
 ```
 
-### 步骤 8：写入 `.claude/orders/<customerReferenceNo>.json`（仅 `--confirm` 模式 + 仅分支 A 成功）
+### 步骤 6：写入 `.claude/orders/<customerReferenceNo>.json`（仅 `--confirm` 模式 + 仅分支 A 成功）
 
 保存订单快照到本地，便于后续 `/hotel-cancel` 用：
 
@@ -420,8 +393,7 @@ done
   "guests": [...],
   "status": 2,
   "bookingTime": "2026-08-21T08:00:00Z",
-  "totalRate": {"currency": "USD", "amount": 555.00},
-  "sessionId": "<session-id>"
+  "totalRate": {"currency": "USD", "amount": 555.00}
 }
 ```
 
@@ -431,14 +403,14 @@ done
 
 | 现象 | 处理 |
 |------|------|
-| `code: 0` + `status: 1` | 走 A 分支 → 轮询（**真实生产环境**） |
-| `code: 0` + `status: 4` | 走 D 分支（失败，**真实生产环境**） |
-| `code: 100001111` | 走 B 分支（ARI 变更，**真实生产环境**） |
-| `code: 100000400` | 走 C 分支（参数错，**演示环境实测**） |
-| `code: 100000404` | 走 E 分支（session 不存在，**演示环境实测**） |
-| 其他 `code != 0` | 走 E 分支（API 异常） |
-| `curl` 退出码非 0 | 重跑一次 + 报告 stderr |
-| `data.ticket` 缺失 | 检查 `msg`，可能是 appKey 失效 |
+| `body.code: 0` + `status: 1` | 走 A 分支 → 轮询（**真实生产环境**） |
+| `body.code: 0` + `status: 4` | 走 D 分支（失败，**真实生产环境**） |
+| `body.code: 100001111` | 走 B 分支（ARI 变更，**真实生产环境**） |
+| `body.code: 100000400` | 走 C 分支（参数错，**演示环境实测**） |
+| `body.code: 100000404` | 走 E 分支（session 不存在，**演示环境实测**） |
+| 其他 `body.code != 0` | 走 E 分支（API 异常） |
+| `hbcli ok == false` | 走 E 分支（HTTP 4xx/5xx） |
+| `hbcli` 退出码非 0 | 重跑一次 + 报告 stderr |
 | `ratePkgId` 含空格 / 看起来不对 | 反问："ratePkgId 是从 /hotel-check-availability 复制的长字符串" |
 | 轮询 18 次仍未确定状态 | 报告"超时"，保留 `customerReferenceNo` 让用户手动查 |
 
@@ -459,8 +431,7 @@ holder=张三 zhangsan@example.com
 - **不要默认真下单**——必须 `--confirm` 标志
 - **不要跳过 `/hotel-check-availability`**——强烈建议先 verify 一次（虽然命令本身不强制，但 SKILL.md 顶部要 warn）
 - **不要把演示凭据 `hotelbyte_api_demo` 写进任何文件 / 文档 / commit**
-- **不要用 `Bash(*)` 宽权限**——本命令只能调 `curl` / `date` / `uuidgen` / `sleep`
-- **不要把 ticket 持久化到 `.claude/memory.db`**
+- **不要用 `Bash(*)` 宽权限**——本命令只能调 `hbcli` + `sleep`
 - **不要硬编码中文姓名** —— CJK 字符传给酒店可能拒收，**反问用户拼音**
 
 ## 已知限制
