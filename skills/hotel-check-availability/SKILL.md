@@ -40,15 +40,21 @@ $ARGUMENTS
 
 ## ⚠️ 演示环境实测注意
 
-实测发现 hotelbyte 演示 API 的 `checkAvail` 端点：
+实测发现 hotelbyte 演示 API 的 `checkAvail` 端点对**真假 ratePkgId 返回不同错误码**：
 
-- **演示环境（`api-test.hotelbyte.com`）无论真假 ratePkgId 都返回 `code: 100000400 / msg: param error`** —— 2026-08-25 实测确认
-- 这跟之前以为的"session not found / 100000404"不一样；演示环境现在返回的是 `param error`
-- `param error` 不代表 ratePkgId 真的是错的，而是演示环境的 `checkAvail` 端点校验更严
+| ratePkgId | code | msg |
+|---|---|---|
+| 真实（来自 `/hotel-search`） | `100000404` | `session not found for userSessionId S-...` |
+| Fake（格式乱写） | `100000400` | `param error` |
+
+**原因**：
+- 演示 ticket **不绑定 sessionId** ——演示环境的 auth ticket 跟 `/api/search/hotelList` 响应里 server 生成的 `data.basic.sessionId` 没有任何关联
+- 演示环境的 checkAvail 服务端要求调用方提供能匹配某 session 的上下文，演示 ticket 满足不了 → 返回 100000404
+- Fake ratePkgId 格式不合法 → 在 404 之前就被参数校验拦下 → 返回 100000400
 
 **真实生产环境**才能完整验证 status: 1（可订）/ status: 2（不可订）的真实响应。演示环境能验证的只有：
-- 错误分支（演示环境统一返回 `code: 100000400`）
-- 不会验证到 status: 1 / status: 2 的真实响应
+- 错误分支（真实 ratePkgId → 100000404，fake → 100000400）
+- 不会验证到 status: 1 / status: 2 / 100001111 ARI 的真实响应
 
 ## 流程
 
@@ -146,33 +152,73 @@ CHECK=$(curl -sS -X POST "${HOTELBYTE_BASE_URL}/api/search/checkAvail" \
 - 选另一个房型或酒店
 ```
 
-#### 分支 C：参数错误（`code: 100000400`）—— **演示环境实测**
+#### 分支 C：参数错误（`code: 100000400`）—— **演示环境对 fake ratePkgId 实测**
 
-**实测响应**（2026-08-25，无论真假 ratePkgId 都返回这条）：
+**实测响应**（2026-08-25，fake ratePkgId 触发）：
 
 ```json
 {"code": 100000400, "msg": "param error"}
 ```
 
+**触发场景**：传入的 `ratePkgId` 格式不合法（演示环境的 checkAvail 端点在校验 `10000000<HB>-1<HB>E<1|2>-NRF|<yyyyMMdd>|<yyyyMMdd>` 格式时直接拒绝）。
+
 输出：
 
 ```markdown
-# ⚠️ 参数错误 / 演示环境限制
+# ⚠️ 参数错误 / 演示环境限制（fake ratePkgId）
 
 API 返回 `code: 100000400`, `msg: "param error"`。
 
-**含义**：hotelbyte API 拒绝该 ratePkgId 或参数。
+**含义**：传入的 `ratePkgId` 格式不合法或参数缺失。
 
 **演示环境下**：
-- 本命令**必然**返回本分支（演示环境的 `checkAvail` 端点即使对真实 ratePkgId 也返回 param error）
-- 这是正常的，**不是 bug**，证明 toolchain 跟 API 通了
+- 这是演示环境的 checkAvail 端点对 fake ratePkgId 的标准响应
+- 真 ratePkgId 不会触发本分支（会触发分支 F）
 
 **生产环境**：
 - 真假 ratePkgId 都能区分：`code: 100000400` 是参数错（包括 fake），`code: 0 + status: 1` 是真可订
 
 **建议**：
+- 从 `/hotel-search` 输出里复制 ratePkgId（不要手敲）
 - 演示环境用 `/hotel-check-availability --test` 跑 fixture 验证 toolchain
-- 真实下单演示环境不可行——请用生产 endpoint + 真实库存
+- 真实下单演示环境不可行——请用生产 endpoint + 真实 ticket
+```
+
+#### 分支 F：Session 缺失（`code: 100000404`）—— **演示环境对真实 ratePkgId 实测**
+
+**实测响应**（2026-08-25，真实 ratePkgId 触发）：
+
+```json
+{
+  "code": 100000404,
+  "msg": "session not found for userSessionId S-20260825094421-0TROR0 (internal: s:1:S-20260825094421-0TROR0)"
+}
+```
+
+**触发场景**：演示 ticket 不绑定 sessionId，调用 checkAvail 时找不到关联的用户 session。
+
+输出：
+
+```markdown
+# ⚠️ 演示环境限制 / session 不绑定 ticket
+
+API 返回 `code: 100000404`, `msg: "session not found for userSessionId S-..."`。
+
+**含义**：hotelbyte 演示 ticket 不绑定 sessionId，checkAvail 拿不到用户上下文。
+
+**演示环境下**：
+- 本命令对**真实** ratePkgId **必然**返回本分支（演示 ticket 跟 session 隔离）
+- 真假 ratePkgId 表现不同：真实 → 100000404（无 session），fake → 100000400（参数错）
+- 这是正常的，**不是 bug**，证明 toolchain 跟 API 通了
+
+**生产环境**：
+- ticket 会绑 sessionId，能正确返回 `code: 0 + status: 1/2` 或 `code: 100001111 ARI changed`
+
+**建议**：
+- 演示环境用 `/hotel-check-availability --test` 跑 fixture 验证 toolchain
+- 真实下单演示环境不可行——请用生产 endpoint + 真实 ticket
+
+> 演示响应里 `S-20260825...` 是 hotelbyte server 生成的临时 sessionId，并非来自我们传的 ticket
 ```
 
 #### 分支 D：ARI 变更（`code: 100001111`）—— 真实生产环境的常见情况
@@ -239,9 +285,10 @@ curl exit code / HTTP status：<code>
 |---|---|
 | `.code == 0` 且 `.data.status == 1` | 走 A 分支（可订）—— **真实生产环境** |
 | `.code == 0` 且 `.data.status == 2` | 走 B 分支（不可订）—— **真实生产环境** |
-| `.code == 100000400` + msg `param error` | 走 C 分支（参数错 / 演示环境**必然**） |
+| `.code == 100000400` + msg `param error` | 走 C 分支（fake ratePkgId / 演示环境对 fake 实测） |
+| `.code == 100000404` + msg `session not found for userSessionId ...` | 走 F 分支（演示环境对真实 ratePkgId **必然**） |
 | `.code == 100001111` + msg `ARI changed` | 走 D 分支（ARI 变更）—— **真实生产环境** |
-| `.code == 100000404` / `.code == 100000429` / 其他非 0 | 走 E 分支（API 异常） |
+| `.code == 100000429` / `.code == 100000500` / 其他非 0 | 走 E 分支（API 异常） |
 | `curl` exit 非 0 / HTTP 非 2xx | 走 E 分支（HTTP 4xx/5xx） |
 | `ratePkgId` 含空格 / 看起来不对 | 反问："ratePkgId 应是从 /hotel-search 复制的长字符串" |
 
@@ -253,7 +300,7 @@ curl exit code / HTTP status：<code>
 ratePkgId=10000000<HB>-1<HB>E2-NRF|20260924|20260926（演示环境 /hotel-search 返回的真实 ratePkgId）
 ```
 
-**演示环境下**：预期返回**分支 C（code: 100000400, msg: param error）**——这是正常的，演示环境的 `checkAvail` 端点限制。
+**演示环境下**：预期返回**分支 F（code: 100000404, msg: session not found）**——这是正常的，演示环境的 checkAvail 端点不绑 ticket session。Fake ratePkgId 走分支 C（code: 100000400）。
 
 输出顶部加 `[fixture] check availability`。用于 toolchain 验证。
 
