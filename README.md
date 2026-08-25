@@ -175,7 +175,6 @@ hotel-ai-skill/
 ## 演示凭据
 
 - Base URL：`https://api-test.hotelbyte.com`
-- AppKey：`hotelbyte_api_demo`
-- AppSecret：`hotelbyte_api_demo`
+- AppKey / AppSecret：从 hotelbyte 官方公开渠道获取（公开 demo key 参见 hotelbyte 官方 docs）
 
-演示环境公网可调，免注册。**仅**演示环境使用；生产请向 hotelbyte 申请 partner key。
+演示环境公网可调，免注册。**仅**演示环境使用；生产请向 hotelbyte 申请 partner key。**agent 不允许把 demo key 写进任何 commit / 持久化文件**——只在用户 shell 环境变量里临时 export。
