@@ -61,26 +61,34 @@ $ARGUMENTS
 | 4 | Failed | 失败 | ❌（终态） |
 | 5 | CancelFailed | 取消失败 | ⚠️（要查原因重试） |
 
-## ⚠️ 演示环境实测注意
+## ⚠️ 演示环境实测注意（2026-08-25 实测更新）
 
-实测发现 hotelbyte 演示 API 的 cancel / queryOrders 端点（2026-08-25 实测）：
+实测发现 hotelbyte 演示 API 的 cancel / queryOrders 端点**对真假 customerReferenceNo 表现不同**：
 
-- **`queryOrders` 空请求 `{}` 返回演示环境所有订单（实测 100 条）** —— 用于发现演示订单 ID
-- **`queryOrders` 指定 customerReferenceNo 过滤**返回匹配订单或空数组
-- **`cancel` 调用无论 customerReferenceNo 真假，都返回 `code: 100000404 / msg: "failed to query order"`** —— cancel 内部先调 queryOrders 找订单，找不到就直接报错
+| 场景 | queryOrders 响应 | cancel 响应 |
+|---|---|---|
+| 真订单 `E2E_TEST_1a05121d-77f4-4751-90a5-c09eb5e01138` | `code: 0, orders:[1 item, status:3]` | `code: 0, data.status: 3` ✅（**演示真能取消，幂等**） |
+| Fake UUID | `code: 0, orders:[]`（空数组） | `code: 100000404, msg: "failed to query order"` |
+| `queryOrders` 空请求 `{}` | `code: 0, orders:[100 items]`（演示所有订单） | — |
 
-**演示环境下唯一真实订单**（用 `queryOrders {}` 实测发现的）：
+**关键发现**（修正此前误判）：
+- **演示环境的 cancel 端点对真实订单**返回 `code: 0 + data.status: 3`，**不是**之前以为的 `100000404`
+- cancel 内部确实先 queryOrders 找订单，找不到才报 100000404
+- 真订单的 cancel 调用实测可完成，**演示环境的取消流程端到端可验证**（虽然 statusAlert=none、cancelReferenceNo 为空）
+
+**演示环境下唯一真实订单**（用 `queryOrders {}` 实测发现的，2026-08-25）：
 
 | 字段 | 值 |
 |---|---|
 | `customerReferenceNo` | `E2E_TEST_1a05121d-77f4-4751-90a5-c09eb5e01138` |
 | `supplierReferenceNo` | `71705286443857226` |
-| `status` | **3 (Cancelled)** —— 已取消，**不能再取消**（幂等） |
+| `status` | **3 (Cancelled)** —— 已取消，再 cancel 是**幂等**（仍返回 status:3，无副作用） |
 
-**演示环境下**本命令的预期行为：
-- Dry-run 用上面的演示订单：queryOrders 找到订单 → 看到 status:3 → 报告"已取消，跳过"
+**演示环境下**本命令的预期行为（修正）：
+- Dry-run 用上面的演示订单：queryOrders 找到订单 → 看到 status:3 → 报告"已取消，跳过 / 演示环境下再 cancel 幂等"
 - Dry-run 用假 customerReferenceNo：queryOrders 返回空数组 → 报告"订单不存在"
-- 真取消 `--confirm` 无论用什么 ID：cancel 返回 `code: 100000404`（演示环境限制）
+- 真取消 `--confirm` 用演示真订单：cancel 返回 `code: 0 + status: 3`（**A 分支，实测**）
+- 真取消 `--confirm` 用 fake ID：cancel 返回 `code: 100000404`（C 分支）
 
 ## 流程
 
@@ -259,15 +267,17 @@ CANCEL=$(curl -sS -X POST "${HOTELBYTE_BASE_URL}/api/trade/cancel" \
 
 **进入轮询**——可能需要 1-2 分钟供应商手工确认。
 
-#### 分支 C：订单不存在（`code: 100000404`）—— **演示环境实测**
+#### 分支 C：订单不存在（`code: 100000404`）—— **演示环境对 fake ID 实测**
 
-**实测响应**（随便给一个不存在的 customerReferenceNo 或 supplierReferenceNo）：
+**实测响应**（fake customerReferenceNo / supplierReferenceNo 触发）：
 
 ```json
 {"code": 100000404, "msg": "failed to query order"}
 ```
 
-**含义**：cancel 内部先 queryOrders 找订单，找不到就返回 404。
+**含义**：cancel 内部先 queryOrders 找订单，找不到就返回 404。queryOrders 也返回空数组。
+
+**演示环境**：fake ID 走本分支；真订单走分支 A（不是分支 C）。
 
 输出：
 
@@ -287,12 +297,12 @@ API 返回 `code: 100000404`, `msg: "failed to query order"`。
 - 演示环境内唯一真实订单（已取消状态 3）：
   - customerReferenceNo: `E2E_TEST_1a05121d-77f4-4751-90a5-c09eb5e01138`
   - supplierReferenceNo: `71705286443857226`
-  - 状态：3 (Cancelled) —— 取消幂等会跳过
+  - 状态：3 (Cancelled) —— 用本 ID 走分支 A（演示真能取消）
 
 **建议**：
 - 检查两个 ID 是否从 `/hotel-book` 输出复制
 - 用 `/hotel-cancel --test` 跑 fixture 验证 toolchain
-- 在生产环境或已有真实订单的环境跑
+- 用演示真订单走分支 A：在生产环境或已有真实订单的环境跑
 ```
 
 不进入轮询。
@@ -425,8 +435,9 @@ reason="Customer request"
 ```
 
 **演示环境下**：
-- Dry-run：queryOrders 查不到这个 UUID → 报告"订单不存在"
-- `--confirm`：cancel 返回 `code: 100000404` ——证明 toolchain 通了
+- Dry-run：queryOrders 查不到这个 UUID → 报告"订单不存在"（分支 C）
+- `--confirm` fake ID：cancel 返回 `code: 100000404`（分支 C）——证明 toolchain 通了
+- `--confirm` 演示真订单 `E2E_TEST_1a05121d-...`：cancel 返回 `code: 0 + status: 3`（分支 A）——**演示真能取消**
 
 输出顶部加 `[fixture] cancel dry-run`。用于演示取消流程。
 
@@ -440,7 +451,7 @@ reason="Customer request"
 
 ## 已知限制
 
-- **演示环境的 cancel 必然失败**（返回 `code: 100000404 / msg: "failed to query order"`）——2026-08-25 实测确认。cancel 内部先 queryOrders 找订单，演示环境的 cancel 端点对所有 ID（包括真实演示订单）都报 404。
+- **演示环境的 cancel 对真订单能跑通**（`code: 0 + data.status: 3`，分支 A，幂等）——2026-08-25 实测确认。fake ID 走 `code: 100000404`（分支 C）。修正此前"演示必然 100000404"的误判。
 - 真实生产环境才能看到 → status 1 / 2 / 4 / 5 全部分支。
 - 取消是**不可逆**操作。**真实订单一旦确认取消，款项会进入退款流程（3-10 工作日）**。
 - 不支持"修改订单"（改日期、改房型）。如需这类操作，必须"取消后重订"，损失取消费。
