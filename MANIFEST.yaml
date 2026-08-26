@@ -68,7 +68,6 @@ skills:
     requires_confirm: false
     tooling:
       required_commands: [curl, date, jq]
-      claude_code_allowed_tools: "Bash(curl:*), Bash(date:*), Bash(jq:*)"
       notes: "curl calls hotelbyte REST API; jq parses the {code, msg, data} envelope; date handles fuzzy-date math (e.g. 'next Friday'). Credentials (demo appKey/appSecret) are NOT persisted in any file — users export them into their shell env per session."
 
   - name: hotel-check-availability
@@ -103,7 +102,6 @@ skills:
     depends_on: [hotel-search]
     tooling:
       required_commands: [curl, jq]
-      claude_code_allowed_tools: "Bash(curl:*), Bash(jq:*)"
       notes: "curl calls hotelbyte REST API; jq parses the {code, msg, data} envelope and ratePkgId structure. Credentials (demo appKey/appSecret) are NOT persisted in any file — users export them into their shell env per session."
 
   - name: hotel-book
@@ -147,7 +145,6 @@ skills:
       - "Polling is bounded (max 18 retries × 10s = 3 minutes). After exhaustion, return last-known status with a 'polling_timeout' gap."
     tooling:
       required_commands: [curl, jq, uuidgen, sleep]
-      claude_code_allowed_tools: "Bash(curl:*), Bash(jq:*), Bash(uuidgen:*), Bash(sleep:*)"
       notes: "curl calls hotelbyte REST API; jq parses the {code, msg, data} envelope and book/queryOrders responses; uuidgen generates the customerReferenceNo idempotency key; sleep paces polling. Credentials (demo appKey/appSecret) are NOT persisted in any file — users export them into their shell env per session."
 
   - name: hotel-cancel
@@ -189,7 +186,6 @@ skills:
       - "Polling bounded identically (max 18 × 10s)."
     tooling:
       required_commands: [curl, jq, sleep]
-      claude_code_allowed_tools: "Bash(curl:*), Bash(jq:*), Bash(sleep:*)"
       notes: "curl calls hotelbyte REST API; jq parses the {code, msg, data} envelope and queryOrders/cancel responses; sleep paces polling. Credentials (demo appKey/appSecret) are NOT persisted in any file — users export them into their shell env per session."
 
 # Honest-contract binding (hotelbyte `agent-dev-contract` v2.0)
@@ -208,9 +204,6 @@ honest_contract:
 
 # Discovery adapters (per-agent) — illustrative only, not enforced by this manifest
 discovery:
-  claude_code:
-    mechanism: "drop this repo's skills/ into .claude/skills/ (allowlist symlink per skill)"
-    notes: "Do NOT use .claude/commands/ — that is Claude-Code-private, not agent-agnostic."
   cursor:
     mechanism: "drop into .cursor/skills/ (allowlist symlink per skill)"
   codex:
